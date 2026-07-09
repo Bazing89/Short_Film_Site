@@ -7,6 +7,7 @@ interface VideoPlayerProps {
 export function VideoPlayer({ film }: VideoPlayerProps) {
   const embedUrl = getStreamEmbedUrl(film);
   const isPlaceholder =
+    !film.embedUrl?.trim() ||
     film.streamId.startsWith("YOUR_STREAM") ||
     embedUrl.includes("YOUR_CUSTOMER_CODE");
 
@@ -29,9 +30,10 @@ export function VideoPlayer({ film }: VideoPlayerProps) {
                 Video Player Placeholder
               </p>
               <p className="mt-2 max-w-md text-sm text-cinema-muted">
-                Replace <code className="text-cinema-accent">streamId</code> in{" "}
-                <code className="text-cinema-accent">src/data/films.ts</code> with
-                your Cloudflare Stream video ID to enable playback.
+                Paste a Bunny Stream{" "}
+                <code className="text-cinema-accent">embedUrl</code> in{" "}
+                <code className="text-cinema-accent">src/data/films.ts</code> to
+                enable playback.
               </p>
             </div>
           </div>
@@ -40,7 +42,7 @@ export function VideoPlayer({ film }: VideoPlayerProps) {
             src={embedUrl}
             title={`${film.title} — video player`}
             className="absolute inset-0 h-full w-full border-0"
-            allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
             allowFullScreen
           />
         )}
