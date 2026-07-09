@@ -39,3 +39,6 @@ next-env.d.ts
 # wrangler
 .wrangler/
 .dev.vars
+
+# secrets
+cloudflare-token.txt
