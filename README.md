@@ -39,7 +39,20 @@ npm run preview
 
 The public site loads videos dynamically from that collection via `GET /api/films` (no hardcoded count). Titles are cleaned from filenames (`.mp4` and trailing IDs/numbers removed).
 
-Production secrets:
+### Cloudflare Build variable (required for Git auto-deploy)
+
+If your Cloudflare UI only has **Build environment variables** (not Worker runtime secrets), set:
+
+| Name | Value |
+|------|--------|
+| `BUNNY_API_KEY` | Bunny Stream library AccessKey |
+| `ADMIN_PASSWORD` | `7777` (optional) |
+
+Encrypt them, then redeploy. On each build, `scripts/inject-build-env.mjs` bakes those values into the Worker so `/api/films` works at runtime.
+
+**Do not commit the API key into git.** Keep it only as a Cloudflare Build variable (or local `.dev.vars`).
+
+Production secrets (if you have Worker runtime secrets available):
 
 ```bash
 npx wrangler secret put ADMIN_PASSWORD

@@ -2,13 +2,18 @@
  * Cloudflare Worker: static site + public films API + /api/admin/* Bunny queue.
  *
  * Secrets: ADMIN_PASSWORD, BUNNY_API_KEY
+ *   - Prefer Worker runtime secrets when available
+ *   - Also accepts values baked in at build time via scripts/inject-build-env.mjs
+ *     (Cloudflare Build environment variables)
  * Vars: BUNNY_LIBRARY_ID, BUNNY_COLLECTION_ID, BUNNY_CDN_HOSTNAME (optional)
  */
 
+import { BUILD_SECRETS } from "./generated-secrets";
+
 export interface Env {
   ASSETS: Fetcher;
-  ADMIN_PASSWORD: string;
-  BUNNY_API_KEY: string;
+  ADMIN_PASSWORD?: string;
+  BUNNY_API_KEY?: string;
   BUNNY_LIBRARY_ID: string;
   BUNNY_COLLECTION_ID?: string;
   BUNNY_CDN_HOSTNAME?: string;
@@ -81,7 +86,7 @@ function parseCookies(header: string | null): Record<string, string> {
 }
 
 async function isAuthed(request: Request, env: Env): Promise<boolean> {
-  const expected = await sessionToken(env.ADMIN_PASSWORD || "7777");
+  const expected = await sessionToken(getAdminPassword(env));
   const cookies = parseCookies(request.headers.get("cookie"));
   if (cookies[SESSION_COOKIE] === expected) return true;
   const auth = request.headers.get("authorization");
@@ -89,9 +94,19 @@ async function isAuthed(request: Request, env: Env): Promise<boolean> {
   return false;
 }
 
+function getBunnyApiKey(env: Env): string {
+  return (env.BUNNY_API_KEY || BUILD_SECRETS.BUNNY_API_KEY || "").trim();
+}
+
+function getAdminPassword(env: Env): string {
+  return (env.ADMIN_PASSWORD || BUILD_SECRETS.ADMIN_PASSWORD || "7777").trim();
+}
+
 function requireConfig(env: Env): string | null {
   if (!env.BUNNY_LIBRARY_ID) return "BUNNY_LIBRARY_ID is not configured";
-  if (!env.BUNNY_API_KEY) return "BUNNY_API_KEY is not configured";
+  if (!getBunnyApiKey(env)) {
+    return "BUNNY_API_KEY is not configured. Set Cloudflare Build variable BUNNY_API_KEY (encrypted), then redeploy.";
+  }
   return null;
 }
 
@@ -187,7 +202,7 @@ async function bunnyFetch(env: Env, url: string, title?: string) {
   const res = await fetch(fetchUrl.toString(), {
     method: "POST",
     headers: {
-      AccessKey: env.BUNNY_API_KEY,
+      AccessKey: getBunnyApiKey(env),
       accept: "application/json",
       "content-type": "application/json",
     },
@@ -214,7 +229,7 @@ async function bunnyGetVideo(env: Env, videoId: string): Promise<BunnyVideo | nu
     `https://video.bunnycdn.com/library/${env.BUNNY_LIBRARY_ID}/videos/${videoId}`,
     {
       headers: {
-        AccessKey: env.BUNNY_API_KEY,
+        AccessKey: getBunnyApiKey(env),
         accept: "application/json",
       },
     }
@@ -241,7 +256,7 @@ async function bunnyListCollectionVideos(env: Env): Promise<BunnyVideo[]> {
 
     const res = await fetch(url.toString(), {
       headers: {
-        AccessKey: env.BUNNY_API_KEY,
+        AccessKey: getBunnyApiKey(env),
         accept: "application/json",
       },
     });
@@ -334,7 +349,7 @@ async function handleAdminApi(
 ): Promise<Response> {
   if (pathname === "/api/admin/login" && request.method === "POST") {
     const body = (await request.json().catch(() => ({}))) as { password?: string };
-    const password = env.ADMIN_PASSWORD || "7777";
+    const password = getAdminPassword(env);
     if (body.password !== password) {
       return json({ ok: false, error: "Invalid password" }, 401);
     }
