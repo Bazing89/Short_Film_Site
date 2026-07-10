@@ -36,10 +36,16 @@ export function Footer() {
           </nav>
         </div>
 
-        <div className="mt-8 border-t border-cinema-border/30 pt-8 text-center">
+        <div className="mt-8 flex flex-col items-center gap-3 border-t border-cinema-border/30 pt-8 sm:flex-row sm:justify-between">
           <p className="text-xs text-cinema-muted">
             &copy; {year} GirlCumXXX. All rights reserved.
           </p>
+          <Link
+            href="/admin"
+            className="text-xs uppercase tracking-wider text-cinema-muted/70 transition-colors hover:text-cinema-accent"
+          >
+            Admin
+          </Link>
         </div>
       </div>
     </footer>

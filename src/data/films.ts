@@ -58,7 +58,9 @@ export const films: Film[] = [
     streamId: "bunny",
     // >>> PUT BUNNY VIDEO PLAY ID / EMBED URL HERE <<<
     // Example: "https://player.mediadelivery.net/embed/YOUR_LIBRARY_ID/YOUR_VIDEO_ID"
-    embedUrl: "https://player.mediadelivery.net/play/700551/9c00c56f-1a75-4337-b9af-a3c24565f00a",
+    // Library 700551 — use /embed/ (not /play/) for the site iframe
+    embedUrl:
+      "https://player.mediadelivery.net/embed/700551/9c00c56f-1a75-4337-b9af-a3c24565f00a",
     runtime: "",
     year: 2026,
     genre: "",
@@ -74,7 +76,8 @@ export const films: Film[] = [
     poster: PLACEHOLDER_POSTER,
     streamId: "bunny",
     // >>> PUT BUNNY VIDEO PLAY ID / EMBED URL HERE <<<
-    embedUrl: "https://player.mediadelivery.net/play/700551/ab06f681-1c7f-4f7d-b5a7-a6892ec4acc4",
+    embedUrl:
+      "https://player.mediadelivery.net/embed/700551/ab06f681-1c7f-4f7d-b5a7-a6892ec4acc4",
     runtime: "",
     year: 2026,
     genre: "",
@@ -89,7 +92,10 @@ export const films: Film[] = [
     poster: PLACEHOLDER_POSTER,
     streamId: "bunny",
     // >>> PUT BUNNY VIDEO PLAY ID / EMBED URL HERE <<<
-    embedUrl: "",
+    // Normalized from: b2b3c0df-b12e-4a34-af528266ccac-b84f-47cb
+    // Confirm this Video ID in Bunny if playback fails
+    embedUrl:
+      "https://player.mediadelivery.net/embed/700551/b2b3c0df-b12e-4a34-af52-8266ccacb84f",
     runtime: "",
     year: 2026,
     genre: "",

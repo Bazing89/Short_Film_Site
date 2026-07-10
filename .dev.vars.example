@@ -1,0 +1,3 @@
+# Copy to .dev.vars for local `wrangler dev` / `npm run preview`
+ADMIN_PASSWORD=7777
+BUNNY_API_KEY=paste_your_bunny_stream_library_api_key_here

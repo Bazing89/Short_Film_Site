@@ -19,6 +19,33 @@ A modern, cinematic website for showcasing and streaming your original short fil
 - [Tailwind CSS 4](https://tailwindcss.com/)
 - [Cloudflare Pages](https://pages.cloudflare.com/) + [Cloudflare Stream](https://www.cloudflare.com/products/cloudflare-stream/)
 
+## Admin: queue videos into Bunny Stream
+
+Footer → **Admin** (password `7777` by default).
+
+1. Copy `.dev.vars.example` → `.dev.vars` and set your Bunny Stream **library API key**
+2. Build + run the Worker (API only works through Wrangler, not plain `next dev`):
+
+```bash
+cp .dev.vars.example .dev.vars
+# edit .dev.vars — set BUNNY_API_KEY from Bunny → Stream → Library → API
+
+npm run preview
+# or: npm run deploy
+```
+
+3. Open `/admin`, log in, paste **direct video file URLs** (one per line)
+4. Bunny fetches each URL into library `700551`; progress bars + library history update automatically
+
+Production secrets:
+
+```bash
+npx wrangler secret put ADMIN_PASSWORD
+npx wrangler secret put BUNNY_API_KEY
+```
+
+**Note:** Bunny URL-fetch needs a publicly reachable media file URL (often `.mp4`). HTML page links from tube sites usually fail.
+
 ## Getting Started
 
 ### Prerequisites
