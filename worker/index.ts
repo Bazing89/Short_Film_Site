@@ -28,6 +28,7 @@ type BunnyVideo = {
   dateUploaded?: string;
   views?: number;
   thumbnailFileName?: string;
+  thumbnailUrl?: string;
   collectionId?: string;
 };
 
@@ -163,12 +164,18 @@ function mapBunnyStatus(status?: number, encodeProgress?: number) {
 }
 
 function posterFor(env: Env, video: BunnyVideo): string {
-  const host = (env.BUNNY_CDN_HOSTNAME || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
-  if (host) {
-    return `https://${host}/${video.guid}/thumbnail.jpg`;
-  }
-  // Bunny Stream default thumbnail path used by many libraries
-  return `https://vz-${env.BUNNY_LIBRARY_ID}.b-cdn.net/${video.guid}/thumbnail.jpg`;
+  // Served via Worker proxy so Bunny referrer/hotlink rules don't blank the cards
+  return `/api/thumbnail/${video.guid}`;
+}
+
+function bunnyThumbnailSource(env: Env, video: BunnyVideo): string {
+  if (video.thumbnailUrl) return video.thumbnailUrl;
+  const host = (env.BUNNY_CDN_HOSTNAME || "")
+    .replace(/^https?:\/\//, "")
+    .replace(/\/$/, "");
+  const file = video.thumbnailFileName || "thumbnail.jpg";
+  if (host) return `https://${host}/${video.guid}/${file}`;
+  return "";
 }
 
 function toFilm(env: Env, video: BunnyVideo): Film {
@@ -456,9 +463,64 @@ async function handleAdminApi(
   return json({ ok: false, error: "Not found" }, 404);
 }
 
+async function handleThumbnail(
+  request: Request,
+  env: Env,
+  pathname: string
+): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const configError = requireConfig(env);
+  if (configError) return new Response(configError, { status: 500 });
+
+  const videoId = decodeURIComponent(pathname.replace("/api/thumbnail/", ""));
+  if (!videoId) return new Response("Missing video id", { status: 400 });
+
+  const video = await bunnyGetVideo(env, videoId);
+  if (!video) return new Response("Not found", { status: 404 });
+
+  const source = bunnyThumbnailSource(env, video);
+  if (!source) return new Response("No thumbnail", { status: 404 });
+
+  const upstream = await fetch(source, {
+    headers: {
+      // Bunny pull zones often block empty/unknown referrers
+      Referer: "https://player.mediadelivery.net/",
+      "User-Agent":
+        "Mozilla/5.0 (compatible; ShortFilmSite/1.0; +https://workers.dev)",
+    },
+  });
+
+  if (!upstream.ok) {
+    return new Response(`Thumbnail upstream ${upstream.status}`, {
+      status: upstream.status === 404 ? 404 : 502,
+    });
+  }
+
+  const headers = new Headers();
+  headers.set(
+    "content-type",
+    upstream.headers.get("content-type") || "image/jpeg"
+  );
+  headers.set("cache-control", "public, max-age=86400");
+  headers.set("access-control-allow-origin", "*");
+
+  if (request.method === "HEAD") {
+    return new Response(null, { status: 200, headers });
+  }
+
+  return new Response(upstream.body, { status: 200, headers });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname.startsWith("/api/thumbnail/")) {
+      return handleThumbnail(request, env, url.pathname);
+    }
 
     if (url.pathname === "/api/films" || url.pathname.startsWith("/api/films/")) {
       return handlePublicFilmsApi(request, env, url.pathname);
