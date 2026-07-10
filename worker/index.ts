@@ -245,7 +245,12 @@ async function bunnyListCollectionVideos(env: Env): Promise<BunnyVideo[]> {
         accept: "application/json",
       },
     });
-    if (!res.ok) break;
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(
+        `Bunny list failed (${res.status})${detail ? `: ${detail.slice(0, 200)}` : ""}`
+      );
+    }
 
     const data = (await res.json()) as {
       items?: BunnyVideo[];
@@ -274,36 +279,49 @@ async function handlePublicFilmsApi(
   }
 
   const configError = requireConfig(env);
-  if (configError) return json({ ok: false, error: configError, films: [] }, 500);
-
-  if (pathname === "/api/films") {
-    const videos = await bunnyListCollectionVideos(env);
-    // Finished (4) or playable resolution-ready — show finished only
-    const films = videos
-      .filter((v) => v.status === 4)
-      .map((v) => toFilm(env, v));
-    return json({
-      ok: true,
-      count: films.length,
-      collectionId: collectionId(env),
-      films,
-    });
+  if (configError) {
+    return json(
+      {
+        ok: false,
+        error: `${configError}. Set it on the Cloudflare Worker (Settings → Variables and Secrets), then redeploy.`,
+        films: [],
+      },
+      500
+    );
   }
 
-  if (pathname.startsWith("/api/films/")) {
-    const id = decodeURIComponent(pathname.replace("/api/films/", ""));
-    const video = await bunnyGetVideo(env, id);
-    if (!video) return json({ ok: false, error: "Not found" }, 404);
-
-    const expectedCollection = collectionId(env);
-    if (video.collectionId && video.collectionId !== expectedCollection) {
-      return json({ ok: false, error: "Not found" }, 404);
+  try {
+    if (pathname === "/api/films") {
+      const videos = await bunnyListCollectionVideos(env);
+      const films = videos
+        .filter((v) => v.status === 4)
+        .map((v) => toFilm(env, v));
+      return json({
+        ok: true,
+        count: films.length,
+        collectionId: collectionId(env),
+        films,
+      });
     }
-    if (video.status !== 4) {
-      return json({ ok: false, error: "Video is still processing" }, 404);
-    }
 
-    return json({ ok: true, film: toFilm(env, video) });
+    if (pathname.startsWith("/api/films/")) {
+      const id = decodeURIComponent(pathname.replace("/api/films/", ""));
+      const video = await bunnyGetVideo(env, id);
+      if (!video) return json({ ok: false, error: "Not found" }, 404);
+
+      const expectedCollection = collectionId(env);
+      if (video.collectionId && video.collectionId !== expectedCollection) {
+        return json({ ok: false, error: "Not found" }, 404);
+      }
+      if (video.status !== 4) {
+        return json({ ok: false, error: "Video is still processing" }, 404);
+      }
+
+      return json({ ok: true, film: toFilm(env, video) });
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown films API error";
+    return json({ ok: false, error: message, films: [] }, 500);
   }
 
   return json({ ok: false, error: "Not found" }, 404);
