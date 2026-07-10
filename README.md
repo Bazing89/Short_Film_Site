@@ -46,6 +46,21 @@ npx wrangler secret put BUNNY_API_KEY
 
 **Note:** Bunny URL-fetch needs a publicly reachable media file URL (often `.mp4`). HTML page links from tube sites usually fail.
 
+### Local: yt-dlp → Bunny upload
+
+Use the [`python-script/`](python-script/) folder to queue links, download one-by-one with `yt-dlp`, and upload to Bunny:
+
+```bash
+# 1. Put URLs in python-script/queue.txt (one per line)
+# 2. Run:
+python3 python-script/download_to_bunny.py
+
+# or interactive:
+python3 python-script/download_to_bunny.py --interactive
+```
+
+See [`python-script/README.md`](python-script/README.md).
+
 ## Getting Started
 
 ### Prerequisites

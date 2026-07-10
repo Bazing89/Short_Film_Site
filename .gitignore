@@ -47,3 +47,10 @@ cloudflare-token.txt
 # local video downloads
 *.mp4
 *.mp4.part
+/downloads/
+/python-script/downloads/
+/python-script/done.txt
+/python-script/failed.txt
+__pycache__/
+*.pyc
+

@@ -1,0 +1,7 @@
+# One URL per line. Lines starting with # are ignored.
+# Run from project root or this folder:
+#   python3 python-script/download_to_bunny.py
+#
+# Examples:
+# https://www.youtube.com/watch?v=VIDEO_ID
+# https://example.com/path/to/video.mp4
