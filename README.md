@@ -35,13 +35,22 @@ npm run preview
 ```
 
 3. Open `/admin`, log in, paste **direct video file URLs** (one per line)
-4. Bunny fetches each URL into library `700551`; progress bars + library history update automatically
+4. Bunny fetches each URL into collection `98f0b8d8-336d-4ab9-9c2c-513c29815305`
+
+The public site loads videos dynamically from that collection via `GET /api/films` (no hardcoded count). Titles are cleaned from filenames (`.mp4` and trailing IDs/numbers removed).
 
 Production secrets:
 
 ```bash
 npx wrangler secret put ADMIN_PASSWORD
 npx wrangler secret put BUNNY_API_KEY
+```
+
+Optional thumbnail CDN host (Bunny Stream pull zone hostname):
+
+```toml
+# wrangler.toml [vars]
+BUNNY_CDN_HOSTNAME = "vz-xxxxx.b-cdn.net"
 ```
 
 **Note:** Bunny URL-fetch needs a publicly reachable media file URL (often `.mp4`). HTML page links from tube sites usually fail.

@@ -1,11 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { VideoCard } from "@/components/VideoCard";
-import {
-  filterAndSortFilms,
-  type SortOption,
-} from "@/data/films";
+import { filterAndSortFilms, type Film, type SortOption } from "@/data/films";
+import { fetchFilms } from "@/lib/filmsApi";
 
 const sortOptions: { value: SortOption; label: string }[] = [
   { value: "most-viewed", label: "Most Viewed" },
@@ -15,11 +13,36 @@ const sortOptions: { value: SortOption; label: string }[] = [
 
 export function HomeContent() {
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<SortOption>("most-viewed");
+  const [sort, setSort] = useState<SortOption>("newest");
+  const [films, setFilms] = useState<Film[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await fetchFilms();
+        if (!cancelled) {
+          setFilms(data);
+          setError("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Failed to load videos");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const displayedFilms = useMemo(
-    () => filterAndSortFilms({ query, sort }),
-    [query, sort]
+    () => filterAndSortFilms(films, { query, sort }),
+    [films, query, sort]
   );
 
   return (
@@ -61,20 +84,31 @@ export function HomeContent() {
         </select>
       </div>
 
-      <p className="mt-4 text-sm text-cinema-muted">
-        {displayedFilms.length} video{displayedFilms.length !== 1 ? "s" : ""}
-      </p>
-
-      {displayedFilms.length > 0 ? (
-        <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-          {displayedFilms.map((film) => (
-            <VideoCard key={film.slug} film={film} />
-          ))}
-        </div>
-      ) : (
+      {loading ? (
         <p className="mt-10 text-center text-sm text-cinema-muted">
-          No videos found. Try a different search or filter.
+          Loading videos from Bunny…
         </p>
+      ) : error ? (
+        <p className="mt-10 text-center text-sm text-red-400">{error}</p>
+      ) : (
+        <>
+          <p className="mt-4 text-sm text-cinema-muted">
+            {displayedFilms.length} video
+            {displayedFilms.length !== 1 ? "s" : ""}
+          </p>
+
+          {displayedFilms.length > 0 ? (
+            <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+              {displayedFilms.map((film) => (
+                <VideoCard key={film.slug} film={film} />
+              ))}
+            </div>
+          ) : (
+            <p className="mt-10 text-center text-sm text-cinema-muted">
+              No videos found. Upload to the Bunny collection to see them here.
+            </p>
+          )}
+        </>
       )}
     </div>
   );

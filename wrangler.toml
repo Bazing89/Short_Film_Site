@@ -9,6 +9,9 @@ not_found_handling = "404-page"
 
 [vars]
 BUNNY_LIBRARY_ID = "700551"
+BUNNY_COLLECTION_ID = "98f0b8d8-336d-4ab9-9c2c-513c29815305"
+# Optional: exact Bunny pull-zone host for thumbnails, e.g. vz-xxxxx.b-cdn.net
+# BUNNY_CDN_HOSTNAME = "vz-xxxxx.b-cdn.net"
 # Set secrets with:
 #   npx wrangler secret put ADMIN_PASSWORD
 #   npx wrangler secret put BUNNY_API_KEY

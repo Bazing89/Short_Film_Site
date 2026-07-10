@@ -1,8 +1,8 @@
 /**
- * Cloudflare Worker: static site + /api/admin/* Bunny URL-fetch queue.
+ * Cloudflare Worker: static site + public films API + /api/admin/* Bunny queue.
  *
  * Secrets: ADMIN_PASSWORD, BUNNY_API_KEY
- * Vars: BUNNY_LIBRARY_ID
+ * Vars: BUNNY_LIBRARY_ID, BUNNY_COLLECTION_ID, BUNNY_CDN_HOSTNAME (optional)
  */
 
 export interface Env {
@@ -10,15 +10,49 @@ export interface Env {
   ADMIN_PASSWORD: string;
   BUNNY_API_KEY: string;
   BUNNY_LIBRARY_ID: string;
+  BUNNY_COLLECTION_ID?: string;
+  BUNNY_CDN_HOSTNAME?: string;
 }
 
+type BunnyVideo = {
+  guid: string;
+  title: string;
+  status: number;
+  encodeProgress?: number;
+  length?: number;
+  dateUploaded?: string;
+  views?: number;
+  thumbnailFileName?: string;
+  collectionId?: string;
+};
+
+type Film = {
+  title: string;
+  slug: string;
+  description: string;
+  synopsis: string;
+  poster: string;
+  streamId: string;
+  embedUrl: string;
+  runtime: string;
+  year: number;
+  genre: string;
+  views: number;
+  credits: [];
+  dateUploaded?: string;
+};
+
 const SESSION_COOKIE = "admin_session";
+const DEFAULT_COLLECTION = "98f0b8d8-336d-4ab9-9c2c-513c29815305";
+const PLACEHOLDER_POSTER =
+  "https://images.unsplash.com/photo-1485846234645-a62644f84728?w=800&q=80";
 
 function json(data: unknown, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=60",
       ...headers,
     },
   });
@@ -61,17 +95,42 @@ function requireConfig(env: Env): string | null {
   return null;
 }
 
+function collectionId(env: Env): string {
+  return env.BUNNY_COLLECTION_ID || DEFAULT_COLLECTION;
+}
+
+/** Filename → display title: strip .mp4 and trailing arbitrary numbers/IDs */
+function cleanVideoTitle(raw: string): string {
+  let title = (raw || "").trim();
+  title = title.replace(/^.*[\\/]/, "");
+  title = title.replace(/\.(mp4|mov|mkv|webm|m4v|avi)$/i, "");
+  title = title.replace(/\s*\[[^\]]*\]\s*$/g, "");
+  title = title.replace(/\s*\(\d+\)\s*$/g, "");
+  title = title.replace(/[\s._-]+\d{3,}\s*$/g, "");
+  title = title.replace(/\s+\d+\s*$/g, "");
+  title = title.replace(/[\s._-]+$/g, "").replace(/\s{2,}/g, " ").trim();
+  return title || raw.trim() || "Untitled";
+}
+
+function formatRuntime(seconds?: number): string {
+  if (!seconds || seconds <= 0) return "";
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
 function titleFromUrl(url: string): string {
   try {
     const path = new URL(url).pathname;
     const name = decodeURIComponent(path.split("/").filter(Boolean).pop() || "");
-    return name.replace(/\.[a-z0-9]+$/i, "") || url;
+    return cleanVideoTitle(name) || url;
   } catch {
     return url;
   }
 }
 
-/** VideoModelStatus → UI progress */
 function mapBunnyStatus(status?: number, encodeProgress?: number) {
   if (status === 4) return { status: "finished" as const, progress: 100 };
   if (status === 5 || status === 6) return { status: "failed" as const, progress: 0 };
@@ -88,19 +147,52 @@ function mapBunnyStatus(status?: number, encodeProgress?: number) {
   return { status: "processing" as const, progress };
 }
 
+function posterFor(env: Env, video: BunnyVideo): string {
+  const host = (env.BUNNY_CDN_HOSTNAME || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+  if (host) {
+    return `https://${host}/${video.guid}/thumbnail.jpg`;
+  }
+  // Bunny Stream default thumbnail path used by many libraries
+  return `https://vz-${env.BUNNY_LIBRARY_ID}.b-cdn.net/${video.guid}/thumbnail.jpg`;
+}
+
+function toFilm(env: Env, video: BunnyVideo): Film {
+  const title = cleanVideoTitle(video.title || video.guid);
+  const year = video.dateUploaded
+    ? new Date(video.dateUploaded).getFullYear()
+    : new Date().getFullYear();
+  return {
+    title,
+    slug: video.guid,
+    description: title,
+    synopsis: title,
+    poster: posterFor(env, video) || PLACEHOLDER_POSTER,
+    streamId: video.guid,
+    embedUrl: `https://player.mediadelivery.net/embed/${env.BUNNY_LIBRARY_ID}/${video.guid}`,
+    runtime: formatRuntime(video.length),
+    year,
+    genre: "",
+    views: video.views ?? 0,
+    credits: [],
+    dateUploaded: video.dateUploaded,
+  };
+}
+
 async function bunnyFetch(env: Env, url: string, title?: string) {
-  const res = await fetch(
-    `https://video.bunnycdn.com/library/${env.BUNNY_LIBRARY_ID}/videos/fetch`,
-    {
-      method: "POST",
-      headers: {
-        AccessKey: env.BUNNY_API_KEY,
-        accept: "application/json",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ url, ...(title ? { title } : {}) }),
-    }
+  const fetchUrl = new URL(
+    `https://video.bunnycdn.com/library/${env.BUNNY_LIBRARY_ID}/videos/fetch`
   );
+  fetchUrl.searchParams.set("collectionId", collectionId(env));
+
+  const res = await fetch(fetchUrl.toString(), {
+    method: "POST",
+    headers: {
+      AccessKey: env.BUNNY_API_KEY,
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ url, ...(title ? { title } : {}) }),
+  });
 
   const data = (await res.json().catch(() => ({}))) as {
     success?: boolean;
@@ -117,7 +209,7 @@ async function bunnyFetch(env: Env, url: string, title?: string) {
   };
 }
 
-async function bunnyGetVideo(env: Env, videoId: string) {
+async function bunnyGetVideo(env: Env, videoId: string): Promise<BunnyVideo | null> {
   const res = await fetch(
     `https://video.bunnycdn.com/library/${env.BUNNY_LIBRARY_ID}/videos/${videoId}`,
     {
@@ -128,38 +220,93 @@ async function bunnyGetVideo(env: Env, videoId: string) {
     }
   );
   if (!res.ok) return null;
-  return (await res.json()) as {
-    guid?: string;
-    status?: number;
-    encodeProgress?: number;
-    title?: string;
-    length?: number;
-    dateUploaded?: string;
-  };
+  return (await res.json()) as BunnyVideo;
 }
 
-async function bunnyListVideos(env: Env) {
-  const res = await fetch(
-    `https://video.bunnycdn.com/library/${env.BUNNY_LIBRARY_ID}/videos?page=1&itemsPerPage=100&orderBy=date`,
-    {
+/** Paginate through every video in the configured collection (no hard limit). */
+async function bunnyListCollectionVideos(env: Env): Promise<BunnyVideo[]> {
+  const items: BunnyVideo[] = [];
+  let page = 1;
+  const itemsPerPage = 100;
+  const collection = collectionId(env);
+
+  while (true) {
+    const url = new URL(
+      `https://video.bunnycdn.com/library/${env.BUNNY_LIBRARY_ID}/videos`
+    );
+    url.searchParams.set("page", String(page));
+    url.searchParams.set("itemsPerPage", String(itemsPerPage));
+    url.searchParams.set("orderBy", "date");
+    url.searchParams.set("collection", collection);
+
+    const res = await fetch(url.toString(), {
       headers: {
         AccessKey: env.BUNNY_API_KEY,
         accept: "application/json",
       },
+    });
+    if (!res.ok) break;
+
+    const data = (await res.json()) as {
+      items?: BunnyVideo[];
+      totalItems?: number;
+      currentPage?: number;
+    };
+    const batch = data.items ?? [];
+    items.push(...batch);
+
+    if (batch.length < itemsPerPage) break;
+    if (data.totalItems != null && items.length >= data.totalItems) break;
+    page += 1;
+    if (page > 200) break; // safety valve
+  }
+
+  return items;
+}
+
+async function handlePublicFilmsApi(
+  request: Request,
+  env: Env,
+  pathname: string
+): Promise<Response> {
+  if (request.method !== "GET") {
+    return json({ ok: false, error: "Method not allowed" }, 405);
+  }
+
+  const configError = requireConfig(env);
+  if (configError) return json({ ok: false, error: configError, films: [] }, 500);
+
+  if (pathname === "/api/films") {
+    const videos = await bunnyListCollectionVideos(env);
+    // Finished (4) or playable resolution-ready — show finished only
+    const films = videos
+      .filter((v) => v.status === 4)
+      .map((v) => toFilm(env, v));
+    return json({
+      ok: true,
+      count: films.length,
+      collectionId: collectionId(env),
+      films,
+    });
+  }
+
+  if (pathname.startsWith("/api/films/")) {
+    const id = decodeURIComponent(pathname.replace("/api/films/", ""));
+    const video = await bunnyGetVideo(env, id);
+    if (!video) return json({ ok: false, error: "Not found" }, 404);
+
+    const expectedCollection = collectionId(env);
+    if (video.collectionId && video.collectionId !== expectedCollection) {
+      return json({ ok: false, error: "Not found" }, 404);
     }
-  );
-  if (!res.ok) return [];
-  const data = (await res.json()) as {
-    items?: Array<{
-      guid: string;
-      title: string;
-      status: number;
-      encodeProgress?: number;
-      length?: number;
-      dateUploaded?: string;
-    }>;
-  };
-  return data.items ?? [];
+    if (video.status !== 4) {
+      return json({ ok: false, error: "Video is still processing" }, 404);
+    }
+
+    return json({ ok: true, film: toFilm(env, video) });
+  }
+
+  return json({ ok: false, error: "Not found" }, 404);
 }
 
 async function handleAdminApi(
@@ -240,12 +387,12 @@ async function handleAdminApi(
   if (pathname === "/api/admin/history" && request.method === "GET") {
     if (configError) return json({ ok: false, error: configError, library: [] }, 500);
 
-    const items = await bunnyListVideos(env);
+    const items = await bunnyListCollectionVideos(env);
     const library = items.map((item) => {
       const mapped = mapBunnyStatus(item.status, item.encodeProgress);
       return {
         bunnyVideoId: item.guid,
-        title: item.title,
+        title: cleanVideoTitle(item.title),
         status: mapped.status,
         progress: mapped.progress,
         length: item.length,
@@ -266,7 +413,7 @@ async function handleAdminApi(
     return json({
       ok: true,
       bunnyVideoId: videoId,
-      title: video.title,
+      title: cleanVideoTitle(video.title || ""),
       ...mapped,
       encodeProgress: video.encodeProgress ?? mapped.progress,
       bunnyStatus: video.status,
@@ -279,6 +426,10 @@ async function handleAdminApi(
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/films" || url.pathname.startsWith("/api/films/")) {
+      return handlePublicFilmsApi(request, env, url.pathname);
+    }
 
     if (url.pathname.startsWith("/api/admin")) {
       return handleAdminApi(request, env, url.pathname);

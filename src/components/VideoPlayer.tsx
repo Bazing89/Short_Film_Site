@@ -30,10 +30,7 @@ export function VideoPlayer({ film }: VideoPlayerProps) {
                 Video Player Placeholder
               </p>
               <p className="mt-2 max-w-md text-sm text-cinema-muted">
-                Paste a Bunny Stream{" "}
-                <code className="text-cinema-accent">embedUrl</code> in{" "}
-                <code className="text-cinema-accent">src/data/films.ts</code> to
-                enable playback.
+                This video does not have a Bunny embed URL yet.
               </p>
             </div>
           </div>

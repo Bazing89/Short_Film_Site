@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -32,6 +33,23 @@ DONE_FILE = HERE / "done.txt"
 FAILED_FILE = HERE / "failed.txt"
 DOWNLOAD_DIR = HERE / "downloads"
 LIBRARY_ID = os.environ.get("BUNNY_LIBRARY_ID", "700551")
+COLLECTION_ID = os.environ.get(
+    "BUNNY_COLLECTION_ID", "98f0b8d8-336d-4ab9-9c2c-513c29815305"
+)
+
+
+def clean_video_title(raw: str) -> str:
+    """Use filename as title: strip extension and trailing arbitrary numbers/IDs."""
+    title = (raw or "").strip()
+    title = title.replace("\\", "/").split("/")[-1]
+    title = re.sub(r"\.(mp4|mov|mkv|webm|m4v|avi)$", "", title, flags=re.I)
+    title = re.sub(r"\s*\[[^\]]*\]\s*$", "", title)
+    title = re.sub(r"\s*\(\d+\)\s*$", "", title)
+    title = re.sub(r"[\s._-]+\d{3,}\s*$", "", title)
+    title = re.sub(r"\s+\d+\s*$", "", title)
+    title = re.sub(r"[\s._-]+$", "", title)
+    title = re.sub(r"\s{2,}", " ", title).strip()
+    return title or (raw or "").strip() or "Untitled"
 
 
 def load_dev_vars() -> dict[str, str]:
@@ -173,13 +191,19 @@ def upload_file_binary(file_path: Path, video_id: str, api_key: str) -> None:
 
 
 def upload_to_bunny(file_path: Path, api_key: str) -> dict:
-    title = file_path.stem
+    title = clean_video_title(file_path.stem)
     print(f"  Creating Bunny video: {title}")
+    print(f"  Collection: {COLLECTION_ID}")
     created = bunny_request(
         "POST",
         f"/library/{LIBRARY_ID}/videos",
         api_key,
-        data=json.dumps({"title": title}).encode("utf-8"),
+        data=json.dumps(
+            {
+                "title": title,
+                "collectionId": COLLECTION_ID,
+            }
+        ).encode("utf-8"),
         content_type="application/json",
     )
     video_id = created.get("guid")
@@ -229,6 +253,7 @@ def upload_existing_downloads(api_key: str) -> int:
         return 1
 
     print(f"Bunny library: {LIBRARY_ID}")
+    print(f"Collection: {COLLECTION_ID}")
     print(f"Uploading {len(files)} existing file(s)\n")
     failed = 0
     for i, file_path in enumerate(files, 1):
@@ -272,6 +297,7 @@ def process_queue(urls: list[str], api_key: str, from_queue_file: bool) -> int:
 
     remaining = list(urls)
     print(f"Bunny library: {LIBRARY_ID}")
+    print(f"Collection: {COLLECTION_ID}")
     print(f"Queued: {len(remaining)} video(s)\n")
 
     failed = 0

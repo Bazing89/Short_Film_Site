@@ -9,7 +9,8 @@
 BUNNY_API_KEY=your_library_access_key
 ```
 
-Library ID defaults to `700551`.
+Library ID defaults to `700551`.  
+Collection ID defaults to `98f0b8d8-336d-4ab9-9c2c-513c29815305` (override with `BUNNY_COLLECTION_ID`).
 
 ## Queue links
 
