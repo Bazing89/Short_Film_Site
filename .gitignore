@@ -51,6 +51,7 @@ cloudflare-token.txt
 /python-script/downloads/
 /python-script/done.txt
 /python-script/failed.txt
+/python-script/queue_meta.json
 __pycache__/
 *.pyc
 

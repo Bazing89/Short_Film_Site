@@ -1,11 +1,12 @@
 import Link from "next/link";
-import type { Film } from "@/data/films";
+import { isOutboundFilm, type Film } from "@/data/films";
 
 interface VideoCardProps {
   film: Film;
 }
 
 export function VideoCard({ film }: VideoCardProps) {
+  const outbound = isOutboundFilm(film);
   return (
     <Link
       href={`/play?id=${encodeURIComponent(film.streamId || film.slug)}`}
@@ -31,6 +32,11 @@ export function VideoCard({ film }: VideoCardProps) {
             </svg>
           </div>
         </div>
+        {outbound ? (
+          <span className="absolute left-2 top-2 rounded bg-cinema-black/80 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-cinema-accent">
+            External
+          </span>
+        ) : null}
         {film.runtime ? (
           <span className="absolute bottom-2 right-2 rounded bg-cinema-black/80 px-1.5 py-0.5 text-[10px] text-cinema-text">
             {film.runtime}

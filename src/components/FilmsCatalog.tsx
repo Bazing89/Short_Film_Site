@@ -37,19 +37,19 @@ export function FilmsCatalog() {
     <>
       <PageHeader
         title="Films"
-        subtitle="Every finished video in your Bunny collection — updates automatically as you upload."
+        subtitle="Bunny-hosted videos and external titles with thumbnails — watch on-site or continue to the source."
       />
 
       <section className="mx-auto max-w-7xl px-4 py-12 sm:px-6 sm:py-16 lg:px-8">
         {loading ? (
           <p className="text-center text-sm text-cinema-muted">
-            Loading videos from Bunny…
+            Loading videos…
           </p>
         ) : error ? (
           <p className="text-center text-sm text-red-400">{error}</p>
         ) : films.length === 0 ? (
           <p className="text-center text-sm text-cinema-muted">
-            No finished videos in the collection yet.
+            No videos yet. Publish outbound links or upload to Bunny.
           </p>
         ) : (
           <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">

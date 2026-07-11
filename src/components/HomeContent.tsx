@@ -86,7 +86,7 @@ export function HomeContent() {
 
       {loading ? (
         <p className="mt-10 text-center text-sm text-cinema-muted">
-          Loading videos from Bunny…
+          Loading videos…
         </p>
       ) : error ? (
         <p className="mt-10 text-center text-sm text-red-400">{error}</p>
@@ -105,7 +105,7 @@ export function HomeContent() {
             </div>
           ) : (
             <p className="mt-10 text-center text-sm text-cinema-muted">
-              No videos found. Upload to the Bunny collection to see them here.
+              No videos yet. Publish outbound links or upload to Bunny.
             </p>
           )}
         </>

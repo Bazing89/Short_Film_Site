@@ -37,7 +37,11 @@ npm run preview
 3. Open `/admin`, log in, paste **direct video file URLs** (one per line)
 4. Bunny fetches each URL into collection `98f0b8d8-336d-4ab9-9c2c-513c29815305`
 
-The public site loads videos dynamically from that collection via `GET /api/films` (no hardcoded count). Titles are cleaned from filenames (`.mp4` and trailing IDs/numbers removed).
+The public site loads videos dynamically via `GET /api/films`:
+- **Bunny** videos from your Stream collection (hosted player)
+- **Outbound links** from `public/outbound-films.json` (thumbnail + ad redirect to the source site)
+
+Use `python-script/ui.py` → **Publish as links** for fast catalog entries, or **Queue for Bunny download** for hosted playback.
 
 ### Cloudflare Build variable (required for Git auto-deploy)
 

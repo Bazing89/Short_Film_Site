@@ -3,6 +3,8 @@ export interface FilmCredit {
   name: string;
 }
 
+export type FilmKind = "bunny" | "outbound";
+
 export interface Film {
   title: string;
   slug: string;
@@ -18,9 +20,18 @@ export interface Film {
   credits: FilmCredit[];
   featured?: boolean;
   dateUploaded?: string;
+  /** bunny = hosted player; outbound = ad redirect to source site */
+  kind?: FilmKind;
+  /** Original watch URL for outbound films */
+  sourceUrl?: string;
+}
+
+export function isOutboundFilm(film: Film): boolean {
+  return film.kind === "outbound" || Boolean(film.sourceUrl && !film.embedUrl);
 }
 
 export function getStreamEmbedUrl(film: Film): string {
+  if (isOutboundFilm(film)) return "";
   if (film.embedUrl) return film.embedUrl;
   return "";
 }

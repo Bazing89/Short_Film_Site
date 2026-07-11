@@ -2,10 +2,11 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { BackLink } from "@/components/PageHeader";
 import { VideoPlayer } from "@/components/VideoPlayer";
 import { FilmCard } from "@/components/FilmCard";
-import { getRelatedFilms, type Film } from "@/data/films";
+import { getRelatedFilms, isOutboundFilm, type Film } from "@/data/films";
 import { fetchFilm, fetchFilms } from "@/lib/filmsApi";
 
 function PlayContent() {
@@ -69,6 +70,8 @@ function PlayContent() {
     );
   }
 
+  const outbound = isOutboundFilm(film);
+
   return (
     <>
       <div className="relative h-48 overflow-hidden sm:h-64 lg:h-80">
@@ -87,12 +90,45 @@ function PlayContent() {
         </div>
 
         <div className="mt-6 max-w-4xl">
-          <VideoPlayer film={film} />
+          {outbound ? (
+            <div className="relative overflow-hidden rounded-lg border border-cinema-border/50 bg-cinema-card">
+              <div className="relative aspect-video w-full">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={film.poster}
+                  alt={film.title}
+                  className="absolute inset-0 h-full w-full object-cover"
+                />
+                <div className="absolute inset-0 bg-cinema-black/55" />
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 p-6 text-center">
+                  <p className="max-w-md text-sm text-cinema-muted">
+                    This title streams on the original site. Continue through a short
+                    ad page to watch.
+                  </p>
+                  <Link
+                    href={`/go?id=${encodeURIComponent(film.streamId)}`}
+                    className="rounded-full bg-cinema-accent px-6 py-3 text-sm font-semibold text-cinema-black transition hover:brightness-110"
+                  >
+                    Watch on source site
+                  </Link>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <VideoPlayer film={film} />
+          )}
 
           <div className="mt-8">
-            <h1 className="font-display text-3xl text-cinema-text sm:text-4xl lg:text-5xl">
-              {film.title}
-            </h1>
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="font-display text-3xl text-cinema-text sm:text-4xl lg:text-5xl">
+                {film.title}
+              </h1>
+              {outbound ? (
+                <span className="rounded-full border border-cinema-accent/40 px-2.5 py-1 text-[11px] uppercase tracking-wider text-cinema-accent">
+                  External
+                </span>
+              ) : null}
+            </div>
 
             <div className="mt-4 flex flex-wrap items-center gap-3 text-sm text-cinema-muted">
               {film.year ? <span>{film.year}</span> : null}

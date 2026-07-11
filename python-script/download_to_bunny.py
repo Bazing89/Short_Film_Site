@@ -15,27 +15,69 @@ Optional:
 from __future__ import annotations
 
 import argparse
+import html as html_lib
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+
+LogFn = Callable[[str], None]
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 DEV_VARS = ROOT / ".dev.vars"
 QUEUE_FILE = HERE / "queue.txt"
+QUEUE_META_FILE = HERE / "queue_meta.json"
 DONE_FILE = HERE / "done.txt"
 FAILED_FILE = HERE / "failed.txt"
 DOWNLOAD_DIR = HERE / "downloads"
+OUTBOUND_PUBLIC = ROOT / "public" / "outbound-films.json"
+OUTBOUND_OUT = ROOT / "out" / "outbound-films.json"
 LIBRARY_ID = os.environ.get("BUNNY_LIBRARY_ID", "700551")
 COLLECTION_ID = os.environ.get(
     "BUNNY_COLLECTION_ID", "98f0b8d8-336d-4ab9-9c2c-513c29815305"
 )
+# How many videos to download/upload at once (override with DOWNLOAD_WORKERS=1..6)
+DOWNLOAD_WORKERS = max(1, min(6, int(os.environ.get("DOWNLOAD_WORKERS", "3"))))
+# Concurrent HLS/DASH fragments per video
+YTDLP_FRAGMENTS = max(1, min(16, int(os.environ.get("YTDLP_FRAGMENTS", "8"))))
+
+SEARCH_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+SEARCH_SOURCES = {
+    "xvideos": {
+        "label": "XVideos",
+        "url": lambda q: f"https://www.xvideos.com/?k={urllib.parse.quote_plus(q)}",
+    },
+    "xnxx": {
+        "label": "XNXX",
+        "url": lambda q: f"https://www.xnxx.com/search/{urllib.parse.quote_plus(q)}",
+    },
+    "pornhub": {
+        "label": "Pornhub",
+        "url": lambda q: (
+            "https://www.pornhub.com/video/search?search="
+            + urllib.parse.quote_plus(q)
+        ),
+    },
+    "fpo": {
+        "label": "MyFPO",
+        "url": lambda q: f"https://www.fpo.xxx/search/{urllib.parse.quote_plus(q)}/",
+    },
+}
 
 
 def clean_video_title(raw: str) -> str:
@@ -50,6 +92,16 @@ def clean_video_title(raw: str) -> str:
     title = re.sub(r"[\s._-]+$", "", title)
     title = re.sub(r"\s{2,}", " ", title).strip()
     return title or (raw or "").strip() or "Untitled"
+
+
+def title_with_actor(base_title: str, actor_name: str = "") -> str:
+    base = clean_video_title(base_title)
+    actor = (actor_name or "").strip()
+    if not actor:
+        return base
+    if actor.lower() in base.lower():
+        return base
+    return f"{actor} — {base}"
 
 
 def load_dev_vars() -> dict[str, str]:
@@ -86,6 +138,369 @@ def append_line(path: Path, line: str) -> None:
         handle.write(line.rstrip() + "\n")
 
 
+def load_queue_meta() -> dict[str, dict]:
+    if not QUEUE_META_FILE.exists():
+        return {}
+    try:
+        data = json.loads(QUEUE_META_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_queue_meta(meta: dict[str, dict]) -> None:
+    QUEUE_META_FILE.write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def prune_queue_meta(urls: list[str]) -> dict[str, dict]:
+    meta = load_queue_meta()
+    keep = {u: meta[u] for u in urls if u in meta}
+    if keep != meta:
+        save_queue_meta(keep)
+    return keep
+
+
+def _fetch_search_html(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": SEARCH_UA})
+    with urllib.request.urlopen(req, timeout=30) as res:
+        return res.read().decode("utf-8", "replace")
+
+
+def _slug_title(path: str) -> str:
+    slug = path.rstrip("/").split("/")[-1]
+    slug = urllib.parse.unquote_plus(slug)
+    slug = re.sub(r"[_+]+", " ", slug)
+    return clean_video_title(slug) or "Untitled"
+
+
+def _parse_xvideos(html: str, limit: int) -> list[dict]:
+    pairs = re.findall(
+        r'href="(/video\.[^"]+)"[^>]*title="([^"]+)"',
+        html,
+        flags=re.I,
+    )
+    if not pairs:
+        pairs = [
+            (path, _slug_title(path))
+            for path in re.findall(r'href="(/video\.[^"]+)"', html, flags=re.I)
+        ]
+    # data-src thumbs keyed by nearby video href
+    thumb_map: dict[str, str] = {}
+    for path, thumb in re.findall(
+        r'href="(/video\.[^"]+)"[^>]*>.{0,500}?data-src="(https?://[^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(path, thumb)
+    for path, thumb in re.findall(
+        r'data-src="(https?://[^"]+)"[^>]*.{0,500}?href="(/video\.[^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(path, thumb)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for path, title in pairs:
+        url = "https://www.xvideos.com" + path
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append(
+            {
+                "id": path,
+                "title": html_lib.unescape(title).strip() or _slug_title(path),
+                "url": url,
+                "site": "xvideos",
+                "poster": thumb_map.get(path, ""),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_xnxx(html: str, limit: int) -> list[dict]:
+    pairs = re.findall(
+        r'href="(/video-[^"]+)"[^>]*title="([^"]+)"',
+        html,
+        flags=re.I,
+    )
+    if not pairs:
+        pairs = [
+            (path, _slug_title(path))
+            for path in re.findall(r'href="(/video-[^"]+)"', html, flags=re.I)
+        ]
+    thumb_map: dict[str, str] = {}
+    for path, thumb in re.findall(
+        r'href="(/video-[^"]+)"[^>]*>.{0,500}?data-src="(https?://[^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(path, thumb)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for path, title in pairs:
+        url = "https://www.xnxx.com" + path
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append(
+            {
+                "id": path,
+                "title": html_lib.unescape(title).strip() or _slug_title(path),
+                "url": url,
+                "site": "xnxx",
+                "poster": thumb_map.get(path, ""),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_pornhub(html: str, limit: int) -> list[dict]:
+    pairs = re.findall(
+        r'href="(/view_video\.php\?viewkey=[^"&]+)"[^>]*title="([^"]+)"',
+        html,
+        flags=re.I,
+    )
+    thumb_map: dict[str, str] = {}
+    for path, thumb in re.findall(
+        r'href="(/view_video\.php\?viewkey=[^"&]+)"[^>]*>.{0,800}?data-mediumthumb="(https?://[^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(path.split("&")[0], thumb)
+    for path, thumb in re.findall(
+        r'data-mediumthumb="(https?://[^"]+)"[^>]*.{0,800}?href="(/view_video\.php\?viewkey=[^"&]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(path.split("&")[0], thumb)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for path, title in pairs:
+        path = path.split("&")[0]
+        url = "https://www.pornhub.com" + path
+        if url in seen:
+            continue
+        seen.add(url)
+        cleaned = html_lib.unescape(title).strip()
+        if cleaned.lower() in {"pornhub", "video"}:
+            continue
+        out.append(
+            {
+                "id": path,
+                "title": cleaned or path,
+                "url": url,
+                "site": "pornhub",
+                "poster": thumb_map.get(path, ""),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_fpo(html: str, limit: int) -> list[dict]:
+    pairs = re.findall(
+        r'href="(https?://(?:www\.)?fpo\.xxx/video/\d+/[^"]+/)"[^>]*title="([^"]+)"',
+        html,
+        flags=re.I,
+    )
+    if not pairs:
+        pairs = [
+            (url, _slug_title(url))
+            for url in re.findall(
+                r'href="(https?://(?:www\.)?fpo\.xxx/video/\d+/[^"]+/)"',
+                html,
+                flags=re.I,
+            )
+        ]
+    thumb_map: dict[str, str] = {}
+    for url, thumb in re.findall(
+        r'href="(https?://(?:www\.)?fpo\.xxx/video/\d+/[^"]+/)"[^>]*>.{0,600}?src="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(url.split("?")[0], thumb)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for url, title in pairs:
+        url = url.split("?")[0]
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append(
+            {
+                "id": url.rstrip("/").split("/")[-2]
+                if url.rstrip("/").split("/")[-1]
+                else url,
+                "title": html_lib.unescape(title).strip() or _slug_title(url),
+                "url": url,
+                "site": "fpo",
+                "poster": thumb_map.get(url, ""),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def outbound_id_for_url(source_url: str) -> str:
+    digest = __import__("hashlib").sha256(source_url.encode("utf-8")).hexdigest()
+    return f"out_{digest[:12]}"
+
+
+def load_outbound_films() -> list[dict]:
+    path = OUTBOUND_PUBLIC if OUTBOUND_PUBLIC.exists() else OUTBOUND_OUT
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_outbound_films(records: list[dict]) -> None:
+    payload = json.dumps(records, indent=2, ensure_ascii=False) + "\n"
+    OUTBOUND_PUBLIC.parent.mkdir(parents=True, exist_ok=True)
+    OUTBOUND_PUBLIC.write_text(payload, encoding="utf-8")
+    if OUTBOUND_OUT.parent.exists():
+        OUTBOUND_OUT.write_text(payload, encoding="utf-8")
+
+
+def fetch_poster_from_page(page_url: str) -> str:
+    try:
+        html = _fetch_search_html(page_url)
+    except Exception:  # noqa: BLE001
+        return ""
+    for pattern in (
+        r'property="og:image"\s+content="([^"]+)"',
+        r'content="([^"]+)"\s+property="og:image"',
+        r'name="twitter:image"\s+content="([^"]+)"',
+        r'content="([^"]+)"\s+name="twitter:image"',
+    ):
+        match = re.search(pattern, html, flags=re.I)
+        if match:
+            return html_lib.unescape(match.group(1).strip())
+    return ""
+
+
+def publish_outbound_links(
+    items: list[dict],
+    actor_name: str = "",
+    log: LogFn = print,
+) -> dict:
+    """Publish selected search results as outbound catalog entries (no download)."""
+    existing = load_outbound_films()
+    by_id = {str(r.get("id")): r for r in existing if r.get("id")}
+    added = 0
+    updated = 0
+    actor = (actor_name or "").strip()
+
+    for item in items:
+        source_url = str(item.get("url") or item.get("sourceUrl") or "").strip()
+        if not source_url:
+            continue
+        film_id = outbound_id_for_url(source_url)
+        title = clean_video_title(str(item.get("title") or source_url))
+        if actor and actor.lower() not in title.lower():
+            title = f"{actor} — {title}"
+        poster = str(item.get("poster") or item.get("posterUrl") or "").strip()
+        if not poster:
+            log(f"  Fetching thumbnail for {title[:48]}…")
+            poster = fetch_poster_from_page(source_url)
+
+        record = {
+            "id": film_id,
+            "title": title,
+            "sourceUrl": source_url,
+            "posterUrl": poster or None,
+            "actor": actor or None,
+            "site": str(item.get("site") or "").strip() or None,
+            "dateAdded": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if film_id in by_id:
+            updated += 1
+        else:
+            added += 1
+        by_id[film_id] = {k: v for k, v in record.items() if v is not None}
+
+    merged = list(by_id.values())
+    save_outbound_films(merged)
+    log(
+        f"Published {added} new outbound link(s)"
+        + (f", updated {updated}" if updated else "")
+        + f". Catalog size: {len(merged)}"
+    )
+    log("Wrote public/outbound-films.json — rebuild/deploy to show on the live site.")
+    return {"added": added, "updated": updated, "count": len(merged), "films": merged}
+
+
+_PARSERS = {
+    "xvideos": _parse_xvideos,
+    "xnxx": _parse_xnxx,
+    "pornhub": _parse_pornhub,
+    "fpo": _parse_fpo,
+}
+
+
+def search_actor_videos(
+    actor_name: str,
+    sources: list[str] | None = None,
+    limit_per_source: int = 24,
+) -> list[dict]:
+    """Search supported sites for videos matching an actor name."""
+    actor = (actor_name or "").strip()
+    if not actor:
+        raise ValueError("Actor name is required")
+
+    chosen = sources or list(SEARCH_SOURCES.keys())
+    results: list[dict] = []
+    seen_urls: set[str] = set()
+
+    for key in chosen:
+        source = SEARCH_SOURCES.get(key)
+        parser = _PARSERS.get(key)
+        if not source or not parser:
+            continue
+        search_url = source["url"](actor)
+        try:
+            page = _fetch_search_html(search_url)
+            found = parser(page, limit_per_source)
+        except Exception as exc:  # noqa: BLE001
+            results.append(
+                {
+                    "id": f"error:{key}",
+                    "title": f"Search failed on {source['label']}: {exc}",
+                    "url": "",
+                    "site": key,
+                    "error": True,
+                }
+            )
+            continue
+
+        for item in found:
+            if item["url"] in seen_urls:
+                continue
+            seen_urls.add(item["url"])
+            item["actor"] = actor
+            results.append(item)
+
+    return [r for r in results if not r.get("error")] + [
+        r for r in results if r.get("error")
+    ]
+
+
 def bunny_request(
     method: str,
     path: str,
@@ -110,17 +525,34 @@ def bunny_request(
         raise RuntimeError(f"Bunny API {err.code}: {detail}") from err
 
 
-def download_with_ytdlp(source_url: str) -> Path:
+def ytdlp_cmd() -> list[str]:
+    """Prefer `python -m yt_dlp` so Windows works when Scripts/ is not on PATH."""
+    return [sys.executable, "-m", "yt_dlp"]
+
+
+def download_with_ytdlp(source_url: str, log: LogFn = print) -> Path:
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     out_template = str(DOWNLOAD_DIR / "%(title)s [%(id)s].%(ext)s")
     before = {p.resolve() for p in DOWNLOAD_DIR.glob("*") if p.is_file()}
 
+    # Prefer a single progressive file (much faster) over video+audio merge.
     cmd = [
-        "yt-dlp",
+        *ytdlp_cmd(),
         "-f",
-        "bv*+ba/b",
+        "b[ext=mp4]/b/bv*+ba/b",
         "--merge-output-format",
         "mp4",
+        "-N",
+        str(YTDLP_FRAGMENTS),
+        "--buffer-size",
+        "64K",
+        "--http-chunk-size",
+        "10M",
+        "--retries",
+        "5",
+        "--fragment-retries",
+        "5",
+        "--no-mtime",
         "-o",
         out_template,
         "--no-overwrites",
@@ -128,12 +560,18 @@ def download_with_ytdlp(source_url: str) -> Path:
         "after_move:filepath",
         "--print",
         "filepath",
+        "--no-progress",
         source_url,
     ]
-    print(f"  yt-dlp downloading…")
+    log(f"  yt-dlp downloading… ({YTDLP_FRAGMENTS} fragments)")
     result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "yt-dlp failed")
+        err = (result.stderr or "").strip() or "yt-dlp failed"
+        if "No module named yt_dlp" in err:
+            raise RuntimeError(
+                "yt-dlp is not installed. Run: python3 -m pip install -U yt-dlp"
+            )
+        raise RuntimeError(err)
 
     printed = [
         line.strip()
@@ -147,11 +585,13 @@ def download_with_ytdlp(source_url: str) -> Path:
 
     after = {p.resolve() for p in DOWNLOAD_DIR.glob("*") if p.is_file()}
     new_files = sorted(after - before, key=lambda p: p.stat().st_mtime, reverse=True)
-    mp4s = [p for p in new_files if p.suffix.lower() == ".mp4"]
+    # Ignore leftover .part files from interrupted runs
+    finished = [p for p in new_files if p.suffix.lower() != ".part"]
+    mp4s = [p for p in finished if p.suffix.lower() == ".mp4"]
     if mp4s:
         return mp4s[0]
-    if new_files:
-        return new_files[0]
+    if finished:
+        return finished[0]
     raise RuntimeError("Download finished but no output file was found")
 
 
@@ -190,10 +630,17 @@ def upload_file_binary(file_path: Path, video_id: str, api_key: str) -> None:
             pass
 
 
-def upload_to_bunny(file_path: Path, api_key: str) -> dict:
-    title = clean_video_title(file_path.stem)
-    print(f"  Creating Bunny video: {title}")
-    print(f"  Collection: {COLLECTION_ID}")
+def upload_to_bunny(
+    file_path: Path,
+    api_key: str,
+    log: LogFn = print,
+    actor_name: str = "",
+    title_hint: str = "",
+) -> dict:
+    base = title_hint or file_path.stem
+    title = title_with_actor(base, actor_name)
+    log(f"  Creating Bunny video: {title}")
+    log(f"  Collection: {COLLECTION_ID}")
     created = bunny_request(
         "POST",
         f"/library/{LIBRARY_ID}/videos",
@@ -211,7 +658,7 @@ def upload_to_bunny(file_path: Path, api_key: str) -> dict:
         raise RuntimeError(f"No video guid returned: {created}")
 
     size_mb = file_path.stat().st_size / (1024 * 1024)
-    print(f"  Uploading {file_path.name} ({size_mb:.1f} MB, streaming)…")
+    log(f"  Uploading {file_path.name} ({size_mb:.1f} MB, streaming)…")
     upload_file_binary(file_path, video_id, api_key)
 
     embed = f"https://player.mediadelivery.net/embed/{LIBRARY_ID}/{video_id}"
@@ -223,7 +670,9 @@ def upload_to_bunny(file_path: Path, api_key: str) -> dict:
     }
 
 
-def mark_success(url_or_label: str, result: dict, file_path: Path) -> None:
+def mark_success(
+    url_or_label: str, result: dict, file_path: Path, log: LogFn = print
+) -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     append_line(
         DONE_FILE,
@@ -231,12 +680,12 @@ def mark_success(url_or_label: str, result: dict, file_path: Path) -> None:
     )
     try:
         file_path.unlink(missing_ok=True)
-        print(f"  Deleted local file: {file_path.name}")
+        log(f"  Deleted local file: {file_path.name}")
     except OSError as cleanup_err:
-        print(f"  Warning: could not delete local file ({cleanup_err})")
-    print("  OK")
-    print(f"  video id:  {result['videoId']}")
-    print(f"  embed url: {result['embedUrl']}\n")
+        log(f"  Warning: could not delete local file ({cleanup_err})")
+    log("  OK")
+    log(f"  video id:  {result['videoId']}")
+    log(f"  embed url: {result['embedUrl']}\n")
 
 
 def upload_existing_downloads(api_key: str) -> int:
@@ -290,45 +739,110 @@ def interactive_urls() -> list[str]:
     return urls
 
 
-def process_queue(urls: list[str], api_key: str, from_queue_file: bool) -> int:
+def process_queue(
+    urls: list[str],
+    api_key: str,
+    from_queue_file: bool,
+    log: LogFn = print,
+    stop_event: threading.Event | None = None,
+    url_meta: dict[str, dict] | None = None,
+    workers: int | None = None,
+) -> int:
     if not urls:
-        print("Queue is empty. Add URLs to python-script/queue.txt and run again.")
+        log("Queue is empty. Add URLs to python-script/queue.txt and run again.")
         return 1
 
     remaining = list(urls)
-    print(f"Bunny library: {LIBRARY_ID}")
-    print(f"Collection: {COLLECTION_ID}")
-    print(f"Queued: {len(remaining)} video(s)\n")
-
+    meta = dict(url_meta or load_queue_meta())
+    workers = max(1, min(6, workers if workers is not None else DOWNLOAD_WORKERS))
+    state_lock = threading.Lock()
     failed = 0
-    for i, url in enumerate(list(remaining), 1):
-        print(f"=== [{i}/{len(urls)}] {url}")
-        file_path: Path | None = None
-        try:
-            file_path = download_with_ytdlp(url)
-            result = upload_to_bunny(file_path, api_key)
-            mark_success(url, result, file_path)
-            remaining.remove(url)
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            append_line(FAILED_FILE, f"{url}\t{exc}")
-            # Keep failed downloads so you can retry/upload manually
-            if file_path and file_path.exists():
-                print(f"  Kept local file after failure: {file_path.name}")
-            print(f"  FAILED: {exc}\n")
-            remaining.remove(url)
+    total = len(urls)
+    completed = 0
 
-        if from_queue_file:
+    log(f"Bunny library: {LIBRARY_ID}")
+    log(f"Collection: {COLLECTION_ID}")
+    log(f"Queued: {total} video(s) · parallel workers: {workers}\n")
+
+    def persist_queue() -> None:
+        if not from_queue_file:
+            return
+        with state_lock:
             write_url_list(
                 QUEUE_FILE,
-                remaining,
+                list(remaining),
                 "# One URL per line. Processed URLs are removed and logged in done.txt",
             )
+            save_queue_meta({u: meta[u] for u in remaining if u in meta})
+
+    def process_one(index: int, url: str) -> None:
+        nonlocal failed, completed
+        if stop_event is not None and stop_event.is_set():
+            return
+
+        item_meta = meta.get(url) or {}
+        actor = str(item_meta.get("actor") or "").strip()
+        title_hint = str(item_meta.get("title") or "").strip()
+        label = f"{actor} | {url}" if actor else url
+        log(f"=== [{index}/{total}] {label}")
+        file_path: Path | None = None
+        try:
+            file_path = download_with_ytdlp(url, log=log)
+            if stop_event is not None and stop_event.is_set():
+                log("  Stopped before upload — keeping local file and queue item.")
+                return
+            result = upload_to_bunny(
+                file_path,
+                api_key,
+                log=log,
+                actor_name=actor,
+                title_hint=title_hint,
+            )
+            mark_success(url, result, file_path, log=log)
+            with state_lock:
+                if url in remaining:
+                    remaining.remove(url)
+                meta.pop(url, None)
+                completed += 1
+        except Exception as exc:  # noqa: BLE001
+            with state_lock:
+                failed += 1
+                if url in remaining:
+                    remaining.remove(url)
+                meta.pop(url, None)
+                completed += 1
+            append_line(FAILED_FILE, f"{url}\t{exc}")
+            if file_path and file_path.exists():
+                log(f"  Kept local file after failure: {file_path.name}")
+            log(f"  FAILED: {exc}\n")
+        persist_queue()
+
+    # Submit in order; worker pool runs several at once.
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = []
+        for i, url in enumerate(urls, 1):
+            if stop_event is not None and stop_event.is_set():
+                break
+            futures.append(pool.submit(process_one, i, url))
+        for fut in as_completed(futures):
+            if stop_event is not None and stop_event.is_set():
+                for pending in futures:
+                    pending.cancel()
+                break
+            try:
+                fut.result()
+            except Exception as exc:  # noqa: BLE001
+                log(f"  Worker error: {exc}")
+
+    if stop_event is not None and stop_event.is_set():
+        log("Stopped by user. Remaining URLs kept in queue.")
+        persist_queue()
+        return 1
 
     if failed:
-        print(f"Finished with {failed} failure(s). See failed.txt")
+        log(f"Finished with {failed} failure(s). See failed.txt")
         return 1
-    print("All uploads finished.")
+    log("All uploads finished.")
     return 0
 
 

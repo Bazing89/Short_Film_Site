@@ -17,6 +17,8 @@ export interface Env {
   BUNNY_LIBRARY_ID: string;
   BUNNY_COLLECTION_ID?: string;
   BUNNY_CDN_HOSTNAME?: string;
+  /** Optional KV for live outbound catalog updates without redeploy */
+  OUTBOUND?: KVNamespace;
 }
 
 type BunnyVideo = {
@@ -46,12 +48,25 @@ type Film = {
   views: number;
   credits: [];
   dateUploaded?: string;
+  kind?: "bunny" | "outbound";
+  sourceUrl?: string;
+};
+
+type OutboundRecord = {
+  id: string;
+  title: string;
+  sourceUrl: string;
+  posterUrl?: string;
+  actor?: string;
+  site?: string;
+  dateAdded?: string;
 };
 
 const SESSION_COOKIE = "admin_session";
 const DEFAULT_COLLECTION = "98f0b8d8-336d-4ab9-9c2c-513c29815305";
 const PLACEHOLDER_POSTER =
   "https://images.unsplash.com/photo-1485846234645-a62644f84728?w=800&q=80";
+const OUTBOUND_KV_KEY = "outbound-films";
 
 function json(data: unknown, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -197,7 +212,86 @@ function toFilm(env: Env, video: BunnyVideo): Film {
     views: video.views ?? 0,
     credits: [],
     dateUploaded: video.dateUploaded,
+    kind: "bunny",
   };
+}
+
+function outboundPoster(record: OutboundRecord): string {
+  const raw = (record.posterUrl || "").trim();
+  if (!raw) return PLACEHOLDER_POSTER;
+  if (raw.startsWith("/api/")) return raw;
+  return `/api/poster?u=${encodeURIComponent(raw)}`;
+}
+
+function toOutboundFilm(record: OutboundRecord): Film {
+  const title = cleanVideoTitle(record.title || record.sourceUrl);
+  const year = record.dateAdded
+    ? new Date(record.dateAdded).getFullYear()
+    : new Date().getFullYear();
+  return {
+    title,
+    slug: record.id,
+    description: record.actor
+      ? `${title} — featuring ${record.actor}`
+      : title,
+    synopsis: record.actor
+      ? `${title} — featuring ${record.actor}`
+      : title,
+    poster: outboundPoster(record),
+    streamId: record.id,
+    embedUrl: "",
+    runtime: "",
+    year,
+    genre: record.site || "link",
+    views: 0,
+    credits: [],
+    dateUploaded: record.dateAdded,
+    kind: "outbound",
+    sourceUrl: record.sourceUrl,
+  };
+}
+
+async function loadOutboundFromAssets(request: Request, env: Env): Promise<OutboundRecord[]> {
+  try {
+    const assetUrl = new URL("/outbound-films.json", request.url);
+    const res = await env.ASSETS.fetch(new Request(assetUrl.toString()));
+    if (!res.ok) return [];
+    const data = (await res.json()) as unknown;
+    return Array.isArray(data) ? (data as OutboundRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function loadOutboundFilms(request: Request, env: Env): Promise<OutboundRecord[]> {
+  if (env.OUTBOUND) {
+    try {
+      const raw = await env.OUTBOUND.get(OUTBOUND_KV_KEY);
+      if (raw) {
+        const data = JSON.parse(raw) as unknown;
+        if (Array.isArray(data)) return data as OutboundRecord[];
+      }
+    } catch {
+      // fall through to assets
+    }
+  }
+  return loadOutboundFromAssets(request, env);
+}
+
+async function saveOutboundFilms(env: Env, records: OutboundRecord[]): Promise<boolean> {
+  if (!env.OUTBOUND) return false;
+  await env.OUTBOUND.put(OUTBOUND_KV_KEY, JSON.stringify(records));
+  return true;
+}
+
+function outboundIdFromUrl(sourceUrl: string): string {
+  // Stable short id from URL (non-crypto hash for Worker sync context)
+  let hash = 2166136261;
+  for (let i = 0; i < sourceUrl.length; i++) {
+    hash ^= sourceUrl.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `out_${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 async function bunnyFetch(env: Env, url: string, title?: string) {
@@ -300,24 +394,34 @@ async function handlePublicFilmsApi(
     return json({ ok: false, error: "Method not allowed" }, 405);
   }
 
-  const configError = requireConfig(env);
-  if (configError) {
-    return json(
-      {
-        ok: false,
-        error: `${configError}. Set it on the Cloudflare Worker (Settings → Variables and Secrets), then redeploy.`,
-        films: [],
-      },
-      500
-    );
-  }
+  const outboundRecords = await loadOutboundFilms(request, env);
+  const outboundFilms = outboundRecords.map(toOutboundFilm);
 
   try {
     if (pathname === "/api/films") {
-      const videos = await bunnyListCollectionVideos(env);
-      const films = videos
-        .filter((v) => v.status === 4)
-        .map((v) => toFilm(env, v));
+      let bunnyFilms: Film[] = [];
+      const configError = requireConfig(env);
+      if (!configError) {
+        try {
+          const videos = await bunnyListCollectionVideos(env);
+          bunnyFilms = videos
+            .filter((v) => v.status === 4)
+            .map((v) => toFilm(env, v));
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : "Bunny list failed";
+          // Still return outbound catalog if Bunny is down
+          return json({
+            ok: true,
+            count: outboundFilms.length,
+            warning: message,
+            collectionId: collectionId(env),
+            films: outboundFilms,
+          });
+        }
+      }
+
+      const films = [...bunnyFilms, ...outboundFilms];
       return json({
         ok: true,
         count: films.length,
@@ -328,6 +432,17 @@ async function handlePublicFilmsApi(
 
     if (pathname.startsWith("/api/films/")) {
       const id = decodeURIComponent(pathname.replace("/api/films/", ""));
+
+      const outbound = outboundRecords.find((r) => r.id === id);
+      if (outbound) {
+        return json({ ok: true, film: toOutboundFilm(outbound) });
+      }
+
+      const configError = requireConfig(env);
+      if (configError) {
+        return json({ ok: false, error: configError }, 500);
+      }
+
       const video = await bunnyGetVideo(env, id);
       if (!video) return json({ ok: false, error: "Not found" }, 404);
 
@@ -460,7 +575,123 @@ async function handleAdminApi(
     });
   }
 
+  if (pathname === "/api/admin/outbound" && request.method === "GET") {
+    const records = await loadOutboundFilms(request, env);
+    return json({ ok: true, films: records, kv: Boolean(env.OUTBOUND) });
+  }
+
+  if (pathname === "/api/admin/outbound" && request.method === "POST") {
+    const body = (await request.json().catch(() => ({}))) as {
+      films?: OutboundRecord[];
+      replace?: boolean;
+    };
+    const incoming = Array.isArray(body.films) ? body.films : [];
+    if (incoming.length === 0) {
+      return json({ ok: false, error: "Provide films: []" }, 400);
+    }
+
+    const normalized: OutboundRecord[] = [];
+    for (const item of incoming) {
+      const sourceUrl = String(item.sourceUrl || "").trim();
+      if (!sourceUrl) continue;
+      const id =
+        String(item.id || "").trim() || outboundIdFromUrl(sourceUrl);
+      normalized.push({
+        id,
+        title: cleanVideoTitle(String(item.title || sourceUrl)),
+        sourceUrl,
+        posterUrl: String(item.posterUrl || "").trim() || undefined,
+        actor: String(item.actor || "").trim() || undefined,
+        site: String(item.site || "").trim() || undefined,
+        dateAdded: item.dateAdded || new Date().toISOString(),
+      });
+    }
+
+    const existing = await loadOutboundFilms(request, env);
+    let merged: OutboundRecord[];
+    if (body.replace) {
+      merged = normalized;
+    } else {
+      const byId = new Map(existing.map((r) => [r.id, r]));
+      for (const rec of normalized) byId.set(rec.id, rec);
+      merged = [...byId.values()];
+    }
+
+    const saved = await saveOutboundFilms(env, merged);
+    return json({
+      ok: true,
+      count: merged.length,
+      added: normalized.length,
+      persisted: saved,
+      message: saved
+        ? "Saved to KV"
+        : "Accepted but KV is not bound — write public/outbound-films.json and redeploy for production",
+      films: merged,
+    });
+  }
+
+  if (pathname.startsWith("/api/admin/outbound/") && request.method === "DELETE") {
+    const id = decodeURIComponent(pathname.replace("/api/admin/outbound/", ""));
+    const existing = await loadOutboundFilms(request, env);
+    const merged = existing.filter((r) => r.id !== id);
+    const saved = await saveOutboundFilms(env, merged);
+    return json({
+      ok: true,
+      count: merged.length,
+      persisted: saved,
+      films: merged,
+    });
+  }
+
   return json({ ok: false, error: "Not found" }, 404);
+}
+
+async function handlePosterProxy(request: Request): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const url = new URL(request.url);
+  const target = url.searchParams.get("u") || "";
+  let parsed: URL;
+  try {
+    parsed = new URL(target);
+  } catch {
+    return new Response("Invalid poster URL", { status: 400 });
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return new Response("Invalid poster protocol", { status: 400 });
+  }
+
+  const upstream = await fetch(parsed.toString(), {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      Referer: `${parsed.origin}/`,
+      Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    },
+  });
+
+  if (!upstream.ok) {
+    return new Response(`Poster upstream ${upstream.status}`, {
+      status: upstream.status === 404 ? 404 : 502,
+    });
+  }
+
+  const contentType = upstream.headers.get("content-type") || "image/jpeg";
+  if (!contentType.startsWith("image/")) {
+    return new Response("Not an image", { status: 502 });
+  }
+
+  const headers = new Headers();
+  headers.set("content-type", contentType);
+  headers.set("cache-control", "public, max-age=86400");
+  headers.set("access-control-allow-origin", "*");
+
+  if (request.method === "HEAD") {
+    return new Response(null, { status: 200, headers });
+  }
+  return new Response(upstream.body, { status: 200, headers });
 }
 
 async function handleThumbnail(
@@ -517,6 +748,10 @@ async function handleThumbnail(
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/poster") {
+      return handlePosterProxy(request);
+    }
 
     if (url.pathname.startsWith("/api/thumbnail/")) {
       return handleThumbnail(request, env, url.pathname);
