@@ -871,7 +871,7 @@ PAGE = r"""<!DOCTYPE html>
           body: JSON.stringify({ urls }),
         });
         prev.statusKey = "";
-        toast(`Published ${data.added || 0} link(s) to site catalog`);
+        toast(`Published ${data.added || 0} link(s)` + (data.synced ? " · live site synced" : " · local only"));
         await refresh();
       } catch (err) {
         toast(err.message || "Publish failed");

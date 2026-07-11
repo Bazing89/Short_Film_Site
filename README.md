@@ -39,9 +39,9 @@ npm run preview
 
 The public site loads videos dynamically via `GET /api/films`:
 - **Bunny** videos from your Stream collection (hosted player)
-- **Outbound links** from `public/outbound-films.json` (thumbnail + ad redirect to the source site)
+- **Outbound links** from Cloudflare KV (`OUTBOUND` binding) or fallback `public/outbound-films.json`
 
-Use `python-script/ui.py` → **Publish as links** for fast catalog entries, or **Queue for Bunny download** for hosted playback.
+Use `python-script/ui.py` → **Publish as links** for fast catalog entries (set `SITE_URL` + bind KV for live sync with no rebuild), or **Queue for Bunny download** for hosted playback.
 
 ### Cloudflare Build variable (required for Git auto-deploy)
 

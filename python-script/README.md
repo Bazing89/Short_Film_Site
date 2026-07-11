@@ -28,7 +28,24 @@ Opens http://127.0.0.1:8765
 3. Choose one:
    - **Publish as links** — adds title + thumbnail to the site catalog; viewers hit an ad page then go to the source site (fast, no download)
    - **Queue for Bunny download** then **Start downloads** — hosts the video on Bunny (`Actor — video title`)
-4. After publishing links, run `npm run build` / `npm run deploy` so `public/outbound-films.json` is live
+4. For **live updates without rebuild**, bind Cloudflare KV as `OUTBOUND` (see below) and set `SITE_URL` in `.dev.vars`
+
+### Live outbound catalog (no rebuild)
+
+Bunny Stream is video hosting, not a general database. Outbound links are stored in **Cloudflare KV** on your Worker:
+
+1. Cloudflare Dashboard → **Storage & Databases → KV** → Create namespace  
+2. Open your Worker → **Settings → Bindings** → Add **KV Namespace**  
+   - Variable name: `OUTBOUND`  
+3. Redeploy once  
+4. In project `.dev.vars`:
+   ```bash
+   SITE_URL=https://your-worker.workers.dev
+   ADMIN_PASSWORD=7777
+   ```
+5. **Publish as links** in the UI — syncs straight to KV; the site picks it up on the next page load
+
+Without KV + `SITE_URL`, links still save to `public/outbound-films.json` and need `npm run deploy`.
 
 You can still paste raw URLs under “Or paste URLs manually”.
 

@@ -395,6 +395,82 @@ def fetch_poster_from_page(page_url: str) -> str:
     return ""
 
 
+def sync_outbound_to_live_site(films: list[dict], log: LogFn = print) -> dict:
+    """Push catalog to the live Worker (Cloudflare KV) so the site updates without rebuild."""
+    env = load_dev_vars()
+    site = (os.environ.get("SITE_URL") or env.get("SITE_URL") or "").strip().rstrip("/")
+    password = (
+        os.environ.get("ADMIN_PASSWORD") or env.get("ADMIN_PASSWORD") or ""
+    ).strip()
+    if not site:
+        return {
+            "ok": False,
+            "skipped": True,
+            "error": "Set SITE_URL in .dev.vars (e.g. https://shortfilmsite.yourname.workers.dev)",
+        }
+    if not password:
+        return {"ok": False, "error": "ADMIN_PASSWORD missing in .dev.vars"}
+
+    def request_json(
+        path: str, payload: dict, token: str | None = None
+    ) -> tuple[int, dict]:
+        body = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(
+            f"{site}{path}",
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as res:
+                raw = res.read().decode("utf-8")
+                data = json.loads(raw) if raw else {}
+                return res.status, data if isinstance(data, dict) else {}
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode("utf-8", errors="replace")
+            try:
+                data = json.loads(detail) if detail else {}
+            except json.JSONDecodeError:
+                data = {"error": detail or str(err)}
+            return err.code, data if isinstance(data, dict) else {"error": detail}
+
+    log(f"  Syncing {len(films)} outbound link(s) to {site}…")
+    status, login = request_json("/api/admin/login", {"password": password})
+    if status >= 400 or not login.get("token"):
+        return {
+            "ok": False,
+            "error": f"Login failed ({status}): {login.get('error') or login}",
+        }
+
+    status, result = request_json(
+        "/api/admin/outbound",
+        {"films": films, "replace": True},
+        token=str(login["token"]),
+    )
+    if status >= 400:
+        return {
+            "ok": False,
+            "error": f"Sync failed ({status}): {result.get('error') or result}",
+        }
+    if not result.get("persisted"):
+        return {
+            "ok": False,
+            "error": (
+                result.get("message")
+                or "Worker has no OUTBOUND KV binding yet — add it in Cloudflare, then retry"
+            ),
+            "result": result,
+        }
+    log(f"  Live site updated ({result.get('count', len(films))} links in KV).")
+    return {"ok": True, "result": result}
+
+
 def publish_outbound_links(
     items: list[dict],
     actor_name: str = "",
@@ -440,10 +516,23 @@ def publish_outbound_links(
     log(
         f"Published {added} new outbound link(s)"
         + (f", updated {updated}" if updated else "")
-        + f". Catalog size: {len(merged)}"
+        + f". Local catalog size: {len(merged)}"
     )
-    log("Wrote public/outbound-films.json — rebuild/deploy to show on the live site.")
-    return {"added": added, "updated": updated, "count": len(merged), "films": merged}
+
+    sync = sync_outbound_to_live_site(merged, log=log)
+    if sync.get("skipped"):
+        log(f"  {sync.get('error')}")
+        log("  Local JSON saved — without SITE_URL + KV, you still need rebuild/deploy.")
+    elif not sync.get("ok"):
+        log(f"  Live sync failed: {sync.get('error')}")
+    return {
+        "added": added,
+        "updated": updated,
+        "count": len(merged),
+        "films": merged,
+        "synced": bool(sync.get("ok")),
+        "sync": sync,
+    }
 
 
 _PARSERS = {

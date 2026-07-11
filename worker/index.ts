@@ -79,6 +79,10 @@ function json(data: unknown, status = 200, headers: HeadersInit = {}): Response 
   });
 }
 
+function jsonFresh(data: unknown, status = 200): Response {
+  return json(data, status, { "cache-control": "no-store" });
+}
+
 async function sha256Hex(value: string): Promise<string> {
   const data = new TextEncoder().encode(value);
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -411,7 +415,7 @@ async function handlePublicFilmsApi(
           const message =
             err instanceof Error ? err.message : "Bunny list failed";
           // Still return outbound catalog if Bunny is down
-          return json({
+          return jsonFresh({
             ok: true,
             count: outboundFilms.length,
             warning: message,
@@ -422,7 +426,7 @@ async function handlePublicFilmsApi(
       }
 
       const films = [...bunnyFilms, ...outboundFilms];
-      return json({
+      return jsonFresh({
         ok: true,
         count: films.length,
         collectionId: collectionId(env),
@@ -435,26 +439,26 @@ async function handlePublicFilmsApi(
 
       const outbound = outboundRecords.find((r) => r.id === id);
       if (outbound) {
-        return json({ ok: true, film: toOutboundFilm(outbound) });
+        return jsonFresh({ ok: true, film: toOutboundFilm(outbound) });
       }
 
       const configError = requireConfig(env);
       if (configError) {
-        return json({ ok: false, error: configError }, 500);
+        return jsonFresh({ ok: false, error: configError }, 500);
       }
 
       const video = await bunnyGetVideo(env, id);
-      if (!video) return json({ ok: false, error: "Not found" }, 404);
+      if (!video) return jsonFresh({ ok: false, error: "Not found" }, 404);
 
       const expectedCollection = collectionId(env);
       if (video.collectionId && video.collectionId !== expectedCollection) {
-        return json({ ok: false, error: "Not found" }, 404);
+        return jsonFresh({ ok: false, error: "Not found" }, 404);
       }
       if (video.status !== 4) {
-        return json({ ok: false, error: "Video is still processing" }, 404);
+        return jsonFresh({ ok: false, error: "Video is still processing" }, 404);
       }
 
-      return json({ ok: true, film: toFilm(env, video) });
+      return jsonFresh({ ok: true, film: toFilm(env, video) });
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown films API error";
@@ -618,16 +622,20 @@ async function handleAdminApi(
     }
 
     const saved = await saveOutboundFilms(env, merged);
-    return json({
-      ok: true,
-      count: merged.length,
-      added: normalized.length,
-      persisted: saved,
-      message: saved
-        ? "Saved to KV"
-        : "Accepted but KV is not bound — write public/outbound-films.json and redeploy for production",
-      films: merged,
-    });
+    return json(
+      {
+        ok: true,
+        count: merged.length,
+        added: normalized.length,
+        persisted: saved,
+        kvBound: Boolean(env.OUTBOUND),
+        message: saved
+          ? "Saved to Cloudflare KV — site updates without rebuild"
+          : "KV binding OUTBOUND is missing. In Cloudflare Dashboard → Worker → Settings → Bindings → Add KV namespace named OUTBOUND, then retry.",
+        films: merged,
+      },
+      saved ? 200 : 503
+    );
   }
 
   if (pathname.startsWith("/api/admin/outbound/") && request.method === "DELETE") {
