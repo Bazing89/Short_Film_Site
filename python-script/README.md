@@ -28,8 +28,29 @@ Opens http://127.0.0.1:8765
 3. Choose one:
    - **Publish as links** — adds title + thumbnail to the site catalog; viewers hit an ad page then go to the source site (fast, no download)
    - **Queue for Bunny download** then **Start downloads** — hosts the video on Bunny (`Actor — video title`)
-4. Or use **Import all from FPO / Playvids** to crawl newest listings (set max pages) and publish every link to the site
+4. Or use **Sync new** / **Import all** from FPO / Playvids:
+   - **Sync new** — pulls only the newest pages and stops when everything is already on your site (use this daily)
+   - **Import all** — deep crawl for a one-time backfill (set max pages high)
 5. For **live updates without rebuild**, bind Cloudflare KV as `OUTBOUND` (see below) and set `SITE_URL` in `.dev.vars`
+
+### Hands-off auto sync (recommended)
+
+FPO/Playvids don’t push updates to you — you poll their “newest” listings on a schedule. Dedupe skips anything already posted.
+
+Run once to test:
+
+```bash
+python3 python-script/download_to_bunny.py --sync-new --pages 5
+```
+
+**Windows Task Scheduler** (every 6 hours):
+
+1. Action: `python3`  
+2. Arguments: `"C:\path\to\Short_Film_Site\python-script\download_to_bunny.py" --sync-new --pages 5`  
+3. Start in: `C:\path\to\Short_Film_Site`  
+4. Ensure you’re logged into Wrangler once (`npx wrangler login`) so KV sync works unattended
+
+Only new titles get added; already-imported links are skipped automatically.
 
 ### Live outbound catalog (no rebuild)
 

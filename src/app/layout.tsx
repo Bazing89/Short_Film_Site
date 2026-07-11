@@ -5,8 +5,8 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: {
-    default: "GirlCumXXX",
-    template: "%s | GirlCumXXX",
+    default: "BangHeroes",
+    template: "%s | BangHeroes",
   },
   description:
     "A curated collection of original short films. Premium indie cinema, streaming free.",

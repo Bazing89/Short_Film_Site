@@ -30,6 +30,26 @@ export function isOutboundFilm(film: Film): boolean {
   return film.kind === "outbound" || Boolean(film.sourceUrl && !film.embedUrl);
 }
 
+/** URL-safe title segment for Google-friendly watch pages */
+export function slugifyFilmTitle(title: string): string {
+  const slug = (title || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return slug || "video";
+}
+
+/** Canonical per-video path: /watch/{title-slug}/{id} */
+export function filmWatchPath(
+  film: Pick<Film, "title" | "slug" | "streamId">
+): string {
+  const id = film.streamId || film.slug;
+  return `/watch/${slugifyFilmTitle(film.title)}/${encodeURIComponent(id)}`;
+}
+
 export function getStreamEmbedUrl(film: Film): string {
   if (isOutboundFilm(film)) return "";
   if (film.embedUrl) return film.embedUrl;

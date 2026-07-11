@@ -1,4 +1,4 @@
-# Shortfilmsite
+# BangHeroes
 
 A modern, cinematic website for showcasing and streaming your original short films. Built with Next.js, TypeScript, and Tailwind CSS — deploy-ready for Cloudflare Pages with Cloudflare Stream video hosting.
 

@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { BackLink } from "@/components/PageHeader";
-import type { Film } from "@/data/films";
+import { filmWatchPath, type Film } from "@/data/films";
 import { fetchFilm } from "@/lib/filmsApi";
 
 const COUNTDOWN_SECONDS = 5;
@@ -88,7 +88,7 @@ function GoContent() {
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-12 sm:px-6 lg:px-8">
-      <BackLink href={`/play?id=${encodeURIComponent(film.streamId)}`} label="Back" />
+      <BackLink href={filmWatchPath(film)} label="Back" />
 
       <div className="mt-8 overflow-hidden rounded-xl border border-cinema-border/50 bg-cinema-card">
         <div className="relative aspect-video bg-cinema-dark">

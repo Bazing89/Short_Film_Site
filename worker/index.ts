@@ -804,9 +804,222 @@ async function handleThumbnail(
   return new Response(upstream.body, { status: 200, headers });
 }
 
+function slugifyFilmTitle(title: string): string {
+  const slug = (title || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return slug || "video";
+}
+
+function filmWatchPath(film: Pick<Film, "title" | "slug" | "streamId">): string {
+  const id = film.streamId || film.slug;
+  return `/watch/${slugifyFilmTitle(film.title)}/${encodeURIComponent(id)}`;
+}
+
+function escapeHtml(value: string): string {
+  return (value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function absoluteUrl(origin: string, pathOrUrl: string): string {
+  if (!pathOrUrl) return origin;
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  return `${origin}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`;
+}
+
+async function findFilmById(
+  request: Request,
+  env: Env,
+  id: string
+): Promise<Film | null> {
+  const outboundRecords = await loadOutboundFilms(request, env);
+  const outbound = outboundRecords.find((r) => r.id === id);
+  if (outbound) return toOutboundFilm(outbound);
+
+  const configError = requireConfig(env);
+  if (configError) return null;
+
+  const video = await bunnyGetVideo(env, id);
+  if (!video || video.status !== 4) return null;
+  const expectedCollection = collectionId(env);
+  if (video.collectionId && video.collectionId !== expectedCollection) return null;
+  return toFilm(env, video);
+}
+
+async function listAllFilms(request: Request, env: Env): Promise<Film[]> {
+  const outboundFilms = (await loadOutboundFilms(request, env)).map(toOutboundFilm);
+  let bunnyFilms: Film[] = [];
+  if (!requireConfig(env)) {
+    try {
+      bunnyFilms = (await bunnyListCollectionVideos(env))
+        .filter((v) => v.status === 4)
+        .map((v) => toFilm(env, v));
+    } catch {
+      // sitemap can still list outbound
+    }
+  }
+  return [...bunnyFilms, ...outboundFilms];
+}
+
+function renderWatchPageHtml(film: Film, origin: string): string {
+  const id = film.streamId || film.slug;
+  const path = filmWatchPath(film);
+  const canonical = `${origin}${path}`;
+  const title = film.title || "Video";
+  const description =
+    film.description ||
+    film.synopsis ||
+    `Watch ${title} on BangHeroes`;
+  const poster = absoluteUrl(origin, film.poster || PLACEHOLDER_POSTER);
+  const outbound = film.kind === "outbound" || Boolean(film.sourceUrl && !film.embedUrl);
+  const watchHref = outbound
+    ? `/go?id=${encodeURIComponent(id)}`
+    : null;
+  const embed = !outbound && film.embedUrl ? film.embedUrl : "";
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "VideoObject",
+    name: title,
+    description,
+    thumbnailUrl: [poster],
+    uploadDate: film.dateUploaded || undefined,
+    contentUrl: canonical,
+    embedUrl: embed || undefined,
+    url: canonical,
+    publisher: {
+      "@type": "Organization",
+      name: "BangHeroes",
+      url: origin,
+    },
+  };
+
+  const playerBlock = embed
+    ? `<div class="player"><iframe src="${escapeHtml(embed)}" title="${escapeHtml(title)}" allow="accelerometer;gyroscope;autoplay;encrypted-media;picture-in-picture" allowfullscreen loading="lazy"></iframe></div>`
+    : `<div class="poster-wrap">
+        <img src="${escapeHtml(poster)}" alt="${escapeHtml(title)}" width="1280" height="720" />
+        <div class="cta">
+          <p>This title streams on the original site. Continue through a short ad page to watch.</p>
+          <a class="btn" href="${escapeHtml(watchHref || "#")}">Watch on source site</a>
+        </div>
+      </div>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)} | BangHeroes</title>
+  <meta name="description" content="${escapeHtml(description)}" />
+  <meta name="robots" content="index,follow,max-image-preview:large" />
+  <link rel="canonical" href="${escapeHtml(canonical)}" />
+  <meta property="og:type" content="video.other" />
+  <meta property="og:site_name" content="BangHeroes" />
+  <meta property="og:title" content="${escapeHtml(title)}" />
+  <meta property="og:description" content="${escapeHtml(description)}" />
+  <meta property="og:url" content="${escapeHtml(canonical)}" />
+  <meta property="og:image" content="${escapeHtml(poster)}" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${escapeHtml(title)}" />
+  <meta name="twitter:description" content="${escapeHtml(description)}" />
+  <meta name="twitter:image" content="${escapeHtml(poster)}" />
+  <script type="application/ld+json">${JSON.stringify(jsonLd).replace(/</g, "\\u003c")}</script>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Georgia, "Times New Roman", serif; background: #0a0a0a; color: #f2f2f0; }
+    a { color: #e8c547; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header, main, footer { max-width: 960px; margin: 0 auto; padding: 1rem 1.25rem; }
+    header { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .brand { font-size: 1.35rem; letter-spacing: 0.04em; color: #f2f2f0; }
+    h1 { font-size: clamp(1.6rem, 4vw, 2.4rem); line-height: 1.15; margin: 1.25rem 0 0.5rem; }
+    .meta { color: #9a9a94; font-size: 0.95rem; margin-bottom: 1.25rem; }
+    .player, .poster-wrap { position: relative; aspect-ratio: 16/9; background: #141414; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; overflow: hidden; }
+    .player iframe, .poster-wrap img { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; object-fit: cover; }
+    .cta { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem; padding: 1.5rem; text-align: center; background: rgba(0,0,0,0.55); }
+    .btn { display: inline-block; background: #e8c547; color: #111; font-weight: 700; padding: 0.85rem 1.4rem; border-radius: 999px; }
+    .btn:hover { text-decoration: none; filter: brightness(1.08); }
+    .desc { margin-top: 1.25rem; color: #c8c8c2; line-height: 1.6; }
+    footer { margin-top: 2rem; border-top: 1px solid rgba(255,255,255,0.08); color: #7a7a74; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="brand" href="/">BangHeroes</a>
+    <a href="/films">All films</a>
+  </header>
+  <main>
+    <article>
+      <h1>${escapeHtml(title)}</h1>
+      <p class="meta">${[film.year || "", film.runtime || "", outbound ? "External" : ""]
+        .filter(Boolean)
+        .map(escapeHtml)
+        .join(" · ")}</p>
+      ${playerBlock}
+      <p class="desc">${escapeHtml(description)}</p>
+    </article>
+  </main>
+  <footer>
+    <p>&copy; ${new Date().getFullYear()} BangHeroes · <a href="/">Home</a> · <a href="/sitemap.xml">Sitemap</a></p>
+  </footer>
+</body>
+</html>`;
+}
+
+function renderSitemapXml(films: Film[], origin: string): string {
+  const urls = films
+    .map((film) => {
+      const loc = `${origin}${filmWatchPath(film)}`;
+      const lastmod = film.dateUploaded
+        ? new Date(film.dateUploaded).toISOString().slice(0, 10)
+        : "";
+      return `  <url>
+    <loc>${escapeHtml(loc)}</loc>${lastmod ? `\n    <lastmod>${lastmod}</lastmod>` : ""}
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>`;
+    })
+    .join("\n");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${escapeHtml(origin)}/</loc>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>${escapeHtml(origin)}/films</loc>
+    <changefreq>daily</changefreq>
+    <priority>0.9</priority>
+  </url>
+${urls}
+</urlset>`;
+}
+
+function renderRobotsTxt(origin: string): string {
+  return `User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /api/
+
+Sitemap: ${origin}/sitemap.xml
+`;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const origin = url.origin;
 
     if (url.pathname === "/api/poster") {
       return handlePosterProxy(request);
@@ -822,6 +1035,66 @@ export default {
 
     if (url.pathname.startsWith("/api/admin")) {
       return handleAdminApi(request, env, url.pathname);
+    }
+
+    if (url.pathname === "/robots.txt") {
+      return new Response(renderRobotsTxt(origin), {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "public, max-age=3600",
+        },
+      });
+    }
+
+    if (url.pathname === "/sitemap.xml") {
+      try {
+        const films = await listAllFilms(request, env);
+        return new Response(renderSitemapXml(films, origin), {
+          headers: {
+            "content-type": "application/xml; charset=utf-8",
+            "cache-control": "public, max-age=300",
+          },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Sitemap error";
+        return new Response(`Sitemap error: ${message}`, { status: 500 });
+      }
+    }
+
+    // SEO watch pages: /watch/{title-slug}/{id} or /watch/{id}
+    const watchMatch = url.pathname.match(/^\/watch\/(?:[^/]+\/)?([^/]+)\/?$/);
+    if (watchMatch) {
+      const id = decodeURIComponent(watchMatch[1] || "");
+      if (!id) {
+        return new Response("Not found", { status: 404 });
+      }
+      const film = await findFilmById(request, env, id);
+      if (!film) {
+        return new Response("Video not found", {
+          status: 404,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      }
+      // Prefer canonical title slug in the URL
+      const canonicalPath = filmWatchPath(film);
+      if (url.pathname.replace(/\/$/, "") !== canonicalPath) {
+        return Response.redirect(`${origin}${canonicalPath}`, 301);
+      }
+      return new Response(renderWatchPageHtml(film, origin), {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "public, max-age=120",
+        },
+      });
+    }
+
+    // Old share links: /play?id=… → canonical /watch/…
+    if (url.pathname === "/play" && url.searchParams.get("id")) {
+      const id = url.searchParams.get("id") || "";
+      const film = await findFilmById(request, env, id);
+      if (film) {
+        return Response.redirect(`${origin}${filmWatchPath(film)}`, 301);
+      }
     }
 
     return env.ASSETS.fetch(request);

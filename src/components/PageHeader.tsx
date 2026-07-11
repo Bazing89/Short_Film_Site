@@ -28,11 +28,13 @@ interface BackLinkProps {
 }
 
 export function BackLink({ href, label }: BackLinkProps) {
-  return (
-    <Link
-      href={href}
-      className="inline-flex items-center gap-2 text-sm text-cinema-muted transition-colors hover:text-cinema-accent"
-    >
+  // Prefer plain anchors so Worker-served /watch pages load correctly
+  // (Next soft navigation has no static route for those URLs).
+  const useAnchor = href.startsWith("/watch");
+  const className =
+    "inline-flex items-center gap-2 text-sm text-cinema-muted transition-colors hover:text-cinema-accent";
+  const inner = (
+    <>
       <svg
         className="h-4 w-4"
         fill="none"
@@ -47,6 +49,18 @@ export function BackLink({ href, label }: BackLinkProps) {
         />
       </svg>
       {label}
+    </>
+  );
+  if (useAnchor) {
+    return (
+      <a href={href} className={className}>
+        {inner}
+      </a>
+    );
+  }
+  return (
+    <Link href={href} className={className}>
+      {inner}
     </Link>
   );
 }

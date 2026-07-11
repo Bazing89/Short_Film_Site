@@ -8,7 +8,7 @@ export function Header() {
           href="/"
           className="font-display text-xl tracking-wide text-cinema-text transition-colors hover:text-cinema-accent sm:text-2xl"
         >
-          GirlCumXXX
+          BangHeroes
         </Link>
       </div>
     </header>

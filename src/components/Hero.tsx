@@ -1,6 +1,6 @@
-import Link from "next/link";
 import Image from "next/image";
 import type { Film } from "@/data/films";
+import { filmWatchPath } from "@/data/films";
 
 interface HeroProps {
   film: Film;
@@ -28,7 +28,7 @@ export function Hero({ film }: HeroProps) {
         </p>
 
         <h1 className="animate-fade-in-up-delay font-display mt-4 max-w-3xl text-4xl leading-tight text-cinema-text sm:text-5xl lg:text-6xl">
-          GirlCumXXX
+          BangHeroes
         </h1>
 
         <p className="animate-fade-in-up-delay mt-4 max-w-xl text-base text-cinema-muted sm:text-lg">
@@ -46,8 +46,8 @@ export function Hero({ film }: HeroProps) {
             {film.description}
           </p>
 
-          <Link
-            href={`/films/${film.slug}`}
+          <a
+            href={filmWatchPath(film)}
             className="mt-6 inline-flex items-center gap-2 rounded-sm bg-cinema-accent px-8 py-3 text-sm font-medium uppercase tracking-widest text-cinema-black transition-all hover:bg-cinema-accent-hover hover:shadow-lg hover:shadow-cinema-accent/20"
           >
             Watch Now
@@ -69,7 +69,7 @@ export function Hero({ film }: HeroProps) {
                 d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
               />
             </svg>
-          </Link>
+          </a>
         </div>
       </div>
     </section>

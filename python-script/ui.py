@@ -223,7 +223,7 @@ def _start_search(actor: str, sources: list[str], limit: int) -> tuple[bool, str
     return True, "Searching"
 
 
-def _run_import(sites: list[str], max_pages: int) -> None:
+def _run_import(sites: list[str], max_pages: int, until_caught_up: bool = False) -> None:
     global _importing, _import_worker, _last_import
     try:
         result = bunny.import_catalog_to_site(
@@ -231,6 +231,7 @@ def _run_import(sites: list[str], max_pages: int) -> None:
             max_pages=max_pages,
             log=_append_log,
             stop_event=_import_stop_event,
+            until_caught_up=until_caught_up,
         )
         with _state_lock:
             _last_import = result
@@ -244,7 +245,9 @@ def _run_import(sites: list[str], max_pages: int) -> None:
             _import_worker = None
 
 
-def _start_import(sites: list[str], max_pages: int) -> tuple[bool, str]:
+def _start_import(
+    sites: list[str], max_pages: int, until_caught_up: bool = False
+) -> tuple[bool, str]:
     global _importing, _import_worker, _last_import
     chosen = [s for s in sites if s in bunny.CATALOG_SOURCES]
     if not chosen:
@@ -263,7 +266,9 @@ def _start_import(sites: list[str], max_pages: int) -> tuple[bool, str]:
         _importing = True
         _import_stop_event.clear()
         _import_worker = threading.Thread(
-            target=_run_import, args=(chosen, max_pages), daemon=True
+            target=_run_import,
+            args=(chosen, max_pages, until_caught_up),
+            daemon=True,
         )
         _import_worker.start()
     return True, "Import started"
@@ -633,13 +638,14 @@ PAGE = r"""<!DOCTYPE html>
     </header>
 
     <section class="panel" style="margin-bottom: 1.1rem;">
-      <h2>Import all from FPO / Playvids</h2>
-      <p class="hint">Crawl newest listings and publish every video as an outbound link on your site (deduped + live KV sync). Large page counts take a long time — start with 5–20 to test.</p>
+      <h2>Import from FPO / Playvids</h2>
+      <p class="hint"><strong>Sync new</strong> = hands-off daily pull of newest pages (stops when links are already on your site). <strong>Import all</strong> = one-time deep crawl for backfill.</p>
       <div class="sources" id="catalogSources"></div>
       <div class="row" style="margin-top: 0.65rem;">
         <label for="importPages" style="font-size: 0.85rem; color: var(--muted); white-space: nowrap;">Max pages</label>
-        <input id="importPages" type="number" min="1" max="1000" value="100" title="Pages per site (1–1000)" />
-        <button class="btn-primary" id="importStartBtn" type="button">Import all</button>
+        <input id="importPages" type="number" min="1" max="1000" value="5" title="Pages per site (1–1000)" />
+        <button class="btn-primary" id="syncNewBtn" type="button">Sync new</button>
+        <button class="btn-secondary" id="importStartBtn" type="button">Import all</button>
         <button class="btn-danger" id="importStopBtn" type="button" disabled>Stop import</button>
       </div>
     </section>
@@ -898,6 +904,7 @@ PAGE = r"""<!DOCTYPE html>
       $("addBtn").disabled = busy;
       $("replaceBtn").disabled = busy;
       $("importStartBtn").disabled = busy;
+      $("syncNewBtn").disabled = busy;
       $("importStopBtn").disabled = !state.importing;
       document.querySelectorAll(".catalog-check").forEach((el) => {
         el.disabled = !!state.importing;
@@ -1028,7 +1035,7 @@ PAGE = r"""<!DOCTYPE html>
       await refresh();
     });
 
-    $("importStartBtn").addEventListener("click", async () => {
+    async function startCatalogImport(untilCaughtUp) {
       const sites = selectedCatalogSites();
       if (!sites.length) {
         toast("Select FPO and/or Playvids");
@@ -1040,15 +1047,19 @@ PAGE = r"""<!DOCTYPE html>
           method: "POST",
           body: JSON.stringify({
             sites,
-            maxPages: Number($("importPages").value || 100),
+            maxPages: Number($("importPages").value || (untilCaughtUp ? 5 : 100)),
+            untilCaughtUp: !!untilCaughtUp,
           }),
         });
-        toast("Import started — watch Activity");
+        toast(untilCaughtUp ? "Syncing newest pages…" : "Import started — watch Activity");
         await refresh();
       } catch (err) {
         toast(err.message || "Import failed to start");
       }
-    });
+    }
+
+    $("syncNewBtn").addEventListener("click", () => startCatalogImport(true));
+    $("importStartBtn").addEventListener("click", () => startCatalogImport(false));
     $("importStopBtn").addEventListener("click", async () => {
       await api("/api/import-stop", { method: "POST", body: "{}" });
       toast("Stopping import after current page…");
@@ -1138,7 +1149,8 @@ class Handler(BaseHTTPRequestHandler):
                 max_pages = int(data.get("maxPages") or 100)
             except (TypeError, ValueError):
                 max_pages = 100
-            ok, message = _start_import(sites, max_pages)
+            until_caught_up = bool(data.get("untilCaughtUp"))
+            ok, message = _start_import(sites, max_pages, until_caught_up=until_caught_up)
             self._send(
                 200 if ok else 400,
                 {"ok": ok, "message": message, **({"error": message} if not ok else {})},

@@ -5,7 +5,7 @@ import { PageHeader } from "@/components/PageHeader";
 export const metadata: Metadata = {
   title: "About",
   description:
-    "Learn about the filmmaker behind GirlCumXXX and the vision behind these original short films.",
+    "Learn about the filmmaker behind BangHeroes and the vision behind these original short films.",
 };
 
 export default function AboutPage() {
@@ -19,7 +19,7 @@ export default function AboutPage() {
       <section className="mx-auto max-w-3xl px-4 py-12 sm:px-6 sm:py-16 lg:px-8">
         <div className="prose-cinema space-y-6 text-base leading-relaxed text-cinema-muted">
           <p>
-            GirlCumXXX is a personal showcase for original short films —
+            BangHeroes is a personal showcase for original short films —
             intimate stories crafted with care, shot on real schedules, and made
             for audiences who appreciate cinema that takes its time.
           </p>

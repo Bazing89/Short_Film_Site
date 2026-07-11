@@ -758,8 +758,13 @@ def import_catalog_to_site(
     max_pages: int = 100,
     log: LogFn = print,
     stop_event: threading.Event | None = None,
+    until_caught_up: bool = False,
 ) -> dict:
-    """Crawl newest listings and publish as outbound links (deduped + KV sync)."""
+    """Crawl newest listings and publish as outbound links (deduped + KV sync).
+
+    until_caught_up: stop a site early once a page adds 0 new videos (all duplicates).
+    Use this for scheduled “sync new” runs so only fresh listings are pulled.
+    """
     chosen = [s for s in (sites or list(CATALOG_SOURCES.keys())) if s in CATALOG_SOURCES]
     if not chosen:
         raise ValueError("No valid catalog sites selected")
@@ -779,7 +784,8 @@ def import_catalog_to_site(
             log("Import stopped by user.")
             break
         label = CATALOG_SOURCES[site]["label"]
-        log(f"=== Importing {label} (up to {max_pages} pages) ===")
+        mode = "until caught up" if until_caught_up else f"up to {max_pages} pages"
+        log(f"=== Importing {label} ({mode}) ===")
         empty_streak = 0
         for page in range(1, max_pages + 1):
             if stop_event is not None and stop_event.is_set():
@@ -804,8 +810,16 @@ def import_catalog_to_site(
             empty_streak = 0
             pages_done += 1
             result = publish_outbound_links(items, actor_name="", log=log)
-            total_added += int(result.get("added") or 0)
-            total_skipped += int(result.get("skipped") or 0)
+            added = int(result.get("added") or 0)
+            skipped = int(result.get("skipped") or 0)
+            total_added += added
+            total_skipped += skipped
+            if until_caught_up and added == 0 and skipped > 0:
+                log(
+                    f"  [{label}] caught up — page {page} had no new links "
+                    f"({skipped} already on site). Stopping this site."
+                )
+                break
 
     log(
         f"Import finished. Added {total_added}, skipped {total_skipped} duplicate(s), "
@@ -1240,7 +1254,41 @@ def main() -> int:
         action="store_true",
         help="Upload videos already in python-script/downloads/ (skip yt-dlp)",
     )
+    parser.add_argument(
+        "--sync-new",
+        action="store_true",
+        help=(
+            "Hands-off catalog sync: pull newest FPO + Playvids pages and publish "
+            "only new outbound links (stops when a page is all duplicates)"
+        ),
+    )
+    parser.add_argument(
+        "--pages",
+        type=int,
+        default=5,
+        help="With --sync-new: max newest pages per site (default 5)",
+    )
+    parser.add_argument(
+        "--sites",
+        default="fpo,playvids",
+        help="With --sync-new: comma-separated sites (default fpo,playvids)",
+    )
     args = parser.parse_args()
+
+    if args.sync_new:
+        sites = [s.strip() for s in str(args.sites).split(",") if s.strip()]
+        result = import_catalog_to_site(
+            sites=sites,
+            max_pages=max(1, int(args.pages)),
+            until_caught_up=True,
+            log=print,
+        )
+        print(
+            f"Sync done: +{result.get('added', 0)} new, "
+            f"{result.get('skipped', 0)} skipped, "
+            f"{result.get('count', 0)} total on site."
+        )
+        return 0
 
     env = load_dev_vars()
     api_key = os.environ.get("BUNNY_API_KEY") or env.get("BUNNY_API_KEY", "")

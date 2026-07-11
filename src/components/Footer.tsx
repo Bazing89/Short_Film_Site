@@ -8,7 +8,7 @@ export function Footer() {
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
         <div className="flex flex-col items-center justify-between gap-6 sm:flex-row">
           <div className="text-center sm:text-left">
-            <p className="font-display text-lg text-cinema-text">GirlCumXXX</p>
+            <p className="font-display text-lg text-cinema-text">BangHeroes</p>
             <p className="mt-1 text-sm text-cinema-muted">
               Original short films, streaming free.
             </p>
@@ -38,7 +38,7 @@ export function Footer() {
 
         <div className="mt-8 flex flex-col items-center gap-3 border-t border-cinema-border/30 pt-8 sm:flex-row sm:justify-between">
           <p className="text-xs text-cinema-muted">
-            &copy; {year} GirlCumXXX. All rights reserved.
+            &copy; {year} BangHeroes. All rights reserved.
           </p>
           <Link
             href="/admin"

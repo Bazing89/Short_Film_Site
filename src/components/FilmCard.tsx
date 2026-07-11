@@ -1,5 +1,4 @@
-import Link from "next/link";
-import { isOutboundFilm, type Film } from "@/data/films";
+import { filmWatchPath, isOutboundFilm, type Film } from "@/data/films";
 
 interface FilmCardProps {
   film: Film;
@@ -8,8 +7,8 @@ interface FilmCardProps {
 export function FilmCard({ film }: FilmCardProps) {
   const outbound = isOutboundFilm(film);
   return (
-    <Link
-      href={`/play?id=${encodeURIComponent(film.streamId || film.slug)}`}
+    <a
+      href={filmWatchPath(film)}
       className="group flex flex-col overflow-hidden rounded-lg border border-cinema-border/50 bg-cinema-card transition-all duration-300 hover:border-cinema-accent/40 hover:shadow-lg hover:shadow-cinema-accent/5"
     >
       <div className="relative aspect-video overflow-hidden bg-cinema-dark">
@@ -48,6 +47,6 @@ export function FilmCard({ film }: FilmCardProps) {
           ) : null}
         </div>
       </div>
-    </Link>
+    </a>
   );
 }
