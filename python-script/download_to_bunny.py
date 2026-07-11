@@ -42,6 +42,10 @@ FAILED_FILE = HERE / "failed.txt"
 DOWNLOAD_DIR = HERE / "downloads"
 OUTBOUND_PUBLIC = ROOT / "public" / "outbound-films.json"
 OUTBOUND_OUT = ROOT / "out" / "outbound-films.json"
+OUTBOUND_KV_ID = os.environ.get(
+    "OUTBOUND_KV_ID", "0c0ad6ce804246e9b95d954674860e36"
+)
+OUTBOUND_KV_KEY = "outbound-films"
 LIBRARY_ID = os.environ.get("BUNNY_LIBRARY_ID", "700551")
 COLLECTION_ID = os.environ.get(
     "BUNNY_COLLECTION_ID", "98f0b8d8-336d-4ab9-9c2c-513c29815305"
@@ -77,6 +81,12 @@ SEARCH_SOURCES = {
         "label": "MyFPO",
         "url": lambda q: f"https://www.fpo.xxx/search/{urllib.parse.quote_plus(q)}/",
     },
+}
+
+# Full-catalog import (newest listings), not actor search
+CATALOG_SOURCES = {
+    "fpo": {"label": "MyFPO", "default_pages": 100},
+    "playvids": {"label": "Playvids", "default_pages": 100},
 }
 
 
@@ -354,8 +364,46 @@ def _parse_fpo(html: str, limit: int) -> list[dict]:
     return out
 
 
+def normalize_source_url(url: str) -> str:
+    """Canonical form so http/https, www, and trailing-slash variants match."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return raw.rstrip("/")
+    scheme = (parsed.scheme or "https").lower()
+    if scheme not in {"http", "https"}:
+        return raw.rstrip("/")
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = parsed.path or "/"
+    path = re.sub(r"/{2,}", "/", path)
+    if len(path) > 1 and path.endswith("/"):
+        path = path[:-1]
+    drop = {
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_term",
+        "utm_content",
+        "fbclid",
+        "gclid",
+    }
+    query = [
+        (k, v)
+        for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=False)
+        if k.lower() not in drop
+    ]
+    query_str = urllib.parse.urlencode(query)
+    return urllib.parse.urlunsplit((scheme, netloc, path, query_str, ""))
+
+
 def outbound_id_for_url(source_url: str) -> str:
-    digest = __import__("hashlib").sha256(source_url.encode("utf-8")).hexdigest()
+    normalized = normalize_source_url(source_url) or source_url.strip()
+    digest = __import__("hashlib").sha256(normalized.encode("utf-8")).hexdigest()
     return f"out_{digest[:12]}"
 
 
@@ -395,80 +443,161 @@ def fetch_poster_from_page(page_url: str) -> str:
     return ""
 
 
-def sync_outbound_to_live_site(films: list[dict], log: LogFn = print) -> dict:
-    """Push catalog to the live Worker (Cloudflare KV) so the site updates without rebuild."""
+def _admin_request_json(
+    site: str,
+    path: str,
+    payload: dict | None = None,
+    token: str | None = None,
+    method: str = "POST",
+) -> tuple[int, dict]:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            "ShortFilmSitePublisher/1.0 (+local-python-script; "
+            "compatible; admin-sync)"
+        ),
+    }
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(
+        f"{site}{path}",
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as res:
+            raw = res.read().decode("utf-8")
+            data = json.loads(raw) if raw else {}
+            return res.status, data if isinstance(data, dict) else {}
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(detail) if detail else {}
+        except json.JSONDecodeError:
+            data = {"error": detail or str(err)}
+        return err.code, data if isinstance(data, dict) else {"error": detail}
+
+
+def fetch_live_outbound_films(log: LogFn = print) -> list[dict]:
+    """Load the live KV catalog so duplicate checks include already-published links."""
+    # Prefer wrangler (bypasses Cloudflare WAF / Error 1010 on Worker URLs)
+    try:
+        result = subprocess.run(
+            [
+                "npx",
+                "--yes",
+                "wrangler@4",
+                "kv",
+                "key",
+                "get",
+                OUTBOUND_KV_KEY,
+                f"--namespace-id={OUTBOUND_KV_ID}",
+                "--remote",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            shell=os.name == "nt",
+        )
+        if result.returncode == 0 and (result.stdout or "").strip():
+            data = json.loads(result.stdout)
+            if isinstance(data, list):
+                log(f"  Loaded {len(data)} existing live outbound link(s) for dedupe.")
+                return data
+    except Exception as exc:  # noqa: BLE001
+        log(f"  Could not load live KV via wrangler ({exc})")
+
+    # Fallback: Worker admin API (may be blocked by Cloudflare bot rules)
     env = load_dev_vars()
     site = (os.environ.get("SITE_URL") or env.get("SITE_URL") or "").strip().rstrip("/")
     password = (
         os.environ.get("ADMIN_PASSWORD") or env.get("ADMIN_PASSWORD") or ""
     ).strip()
-    if not site:
-        return {
-            "ok": False,
-            "skipped": True,
-            "error": "Set SITE_URL in .dev.vars (e.g. https://shortfilmsite.yourname.workers.dev)",
-        }
-    if not password:
-        return {"ok": False, "error": "ADMIN_PASSWORD missing in .dev.vars"}
-
-    def request_json(
-        path: str, payload: dict, token: str | None = None
-    ) -> tuple[int, dict]:
-        body = json.dumps(payload).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        req = urllib.request.Request(
-            f"{site}{path}",
-            data=body,
-            headers=headers,
-            method="POST",
+    if not site or not password:
+        return []
+    try:
+        status, login = _admin_request_json(
+            site, "/api/admin/login", {"password": password}
         )
+        if status >= 400 or not login.get("token"):
+            return []
+        status, data = _admin_request_json(
+            site,
+            "/api/admin/outbound",
+            payload=None,
+            token=str(login["token"]),
+            method="GET",
+        )
+        if status >= 400:
+            return []
+        films = data.get("films")
+        if isinstance(films, list):
+            log(f"  Loaded {len(films)} existing live outbound link(s) for dedupe.")
+            return films
+    except Exception as exc:  # noqa: BLE001
+        log(f"  Could not load live catalog for dedupe ({exc})")
+    return []
+
+
+def sync_outbound_to_live_site(films: list[dict], log: LogFn = print) -> dict:
+    """Push catalog to Cloudflare KV so the site updates without rebuild.
+
+    Uses `wrangler kv key put` (direct to KV API) so Cloudflare WAF / Error 1010
+    on the Worker URL cannot block sync.
+    """
+    tmp_path = HERE / ".outbound-sync.json"
+    try:
+        tmp_path.write_text(
+            json.dumps(films, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        log(f"  Syncing {len(films)} outbound link(s) to Cloudflare KV…")
+        cmd = [
+            "npx",
+            "--yes",
+            "wrangler@4",
+            "kv",
+            "key",
+            "put",
+            OUTBOUND_KV_KEY,
+            f"--namespace-id={OUTBOUND_KV_ID}",
+            f"--path={tmp_path}",
+            "--remote",
+        ]
+        result = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            shell=os.name == "nt",
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "wrangler kv put failed").strip()
+            return {"ok": False, "error": detail[:500]}
+        log(f"  Live KV updated ({len(films)} links).")
+        return {"ok": True, "count": len(films), "method": "wrangler-kv"}
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "error": "npx/wrangler not found. Install Node.js and run: npx wrangler login",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    finally:
         try:
-            with urllib.request.urlopen(req, timeout=60) as res:
-                raw = res.read().decode("utf-8")
-                data = json.loads(raw) if raw else {}
-                return res.status, data if isinstance(data, dict) else {}
-        except urllib.error.HTTPError as err:
-            detail = err.read().decode("utf-8", errors="replace")
-            try:
-                data = json.loads(detail) if detail else {}
-            except json.JSONDecodeError:
-                data = {"error": detail or str(err)}
-            return err.code, data if isinstance(data, dict) else {"error": detail}
-
-    log(f"  Syncing {len(films)} outbound link(s) to {site}…")
-    status, login = request_json("/api/admin/login", {"password": password})
-    if status >= 400 or not login.get("token"):
-        return {
-            "ok": False,
-            "error": f"Login failed ({status}): {login.get('error') or login}",
-        }
-
-    status, result = request_json(
-        "/api/admin/outbound",
-        {"films": films, "replace": True},
-        token=str(login["token"]),
-    )
-    if status >= 400:
-        return {
-            "ok": False,
-            "error": f"Sync failed ({status}): {result.get('error') or result}",
-        }
-    if not result.get("persisted"):
-        return {
-            "ok": False,
-            "error": (
-                result.get("message")
-                or "Worker has no OUTBOUND KV binding yet — add it in Cloudflare, then retry"
-            ),
-            "result": result,
-        }
-    log(f"  Live site updated ({result.get('count', len(films))} links in KV).")
-    return {"ok": True, "result": result}
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def publish_outbound_links(
@@ -478,19 +607,47 @@ def publish_outbound_links(
 ) -> dict:
     """Publish selected search results as outbound catalog entries (no download)."""
     existing = load_outbound_films()
-    by_id = {str(r.get("id")): r for r in existing if r.get("id")}
+    live = fetch_live_outbound_films(log=log)
+    # Prefer live records when both exist (same id)
+    by_id: dict[str, dict] = {}
+    for r in existing + live:
+        rid = str(r.get("id") or "").strip()
+        if rid:
+            by_id[rid] = r
+
+    existing_urls = {
+        normalize_source_url(str(r.get("sourceUrl") or ""))
+        for r in by_id.values()
+        if r.get("sourceUrl")
+    }
+    existing_urls.discard("")
+
     added = 0
-    updated = 0
+    skipped = 0
     actor = (actor_name or "").strip()
+    batch_seen: set[str] = set()
 
     for item in items:
-        source_url = str(item.get("url") or item.get("sourceUrl") or "").strip()
+        source_url = normalize_source_url(
+            str(item.get("url") or item.get("sourceUrl") or "")
+        )
         if not source_url:
             continue
+        if source_url in batch_seen:
+            skipped += 1
+            continue
+        batch_seen.add(source_url)
+
         film_id = outbound_id_for_url(source_url)
         title = clean_video_title(str(item.get("title") or source_url))
         if actor and actor.lower() not in title.lower():
             title = f"{actor} — {title}"
+
+        if film_id in by_id or source_url in existing_urls:
+            skipped += 1
+            log(f"  Skip duplicate: {title[:70]}")
+            continue
+
         poster = str(item.get("poster") or item.get("posterUrl") or "").strip()
         if not poster:
             log(f"  Fetching thumbnail for {title[:48]}…")
@@ -505,33 +662,161 @@ def publish_outbound_links(
             "site": str(item.get("site") or "").strip() or None,
             "dateAdded": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
-        if film_id in by_id:
-            updated += 1
-        else:
-            added += 1
         by_id[film_id] = {k: v for k, v in record.items() if v is not None}
+        existing_urls.add(source_url)
+        added += 1
 
     merged = list(by_id.values())
     save_outbound_films(merged)
     log(
         f"Published {added} new outbound link(s)"
-        + (f", updated {updated}" if updated else "")
-        + f". Local catalog size: {len(merged)}"
+        + (f", skipped {skipped} duplicate(s)" if skipped else "")
+        + f". Catalog size: {len(merged)}"
     )
 
     sync = sync_outbound_to_live_site(merged, log=log)
     if sync.get("skipped"):
         log(f"  {sync.get('error')}")
-        log("  Local JSON saved — without SITE_URL + KV, you still need rebuild/deploy.")
+        log("  Local JSON saved — live KV sync was skipped.")
     elif not sync.get("ok"):
         log(f"  Live sync failed: {sync.get('error')}")
+        log("  Tip: run `npx wrangler login` then publish again.")
     return {
         "added": added,
-        "updated": updated,
+        "skipped": skipped,
+        "updated": 0,
         "count": len(merged),
         "films": merged,
         "synced": bool(sync.get("ok")),
         "sync": sync,
+    }
+
+
+def scrape_fpo_page(page: int) -> list[dict]:
+    """Newest FPO listings. Page 1 = /new-1/, page N = /new-1/N/."""
+    path = "https://www.fpo.xxx/new-1/" if page <= 1 else f"https://www.fpo.xxx/new-1/{page}/"
+    try:
+        html = _fetch_search_html(path)
+    except Exception:  # noqa: BLE001
+        return []
+    return [
+        {**item, "poster": item.get("poster") or ""}
+        for item in _parse_fpo(html, limit=100)
+    ]
+
+
+def scrape_playvids_page(page: int) -> list[dict]:
+    """Newest Playvids listings via ?page=N."""
+    url = f"https://www.playvids.com/?page={max(1, page)}"
+    try:
+        html = _fetch_search_html(url)
+    except Exception:  # noqa: BLE001
+        return []
+    pairs = re.findall(
+        r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"[^>]*>.*?alt="([^"]+)"',
+        html,
+        flags=re.I | re.S,
+    )
+    out: list[dict] = []
+    seen: set[str] = set()
+    skip_prefixes = (
+        "/account/",
+        "/categories/",
+        "/channels/",
+        "/pornstars/",
+        "/tags/",
+        "/search",
+    )
+    for path, title in pairs:
+        path = path.split("?")[0]
+        if any(path.startswith(p) for p in skip_prefixes):
+            continue
+        parts = path.strip("/").split("/")
+        if len(parts) < 2 or len(parts[0]) < 6:
+            continue
+        full = "https://www.playvids.com" + path
+        if full in seen:
+            continue
+        seen.add(full)
+        cleaned = html_lib.unescape(title).strip() or _slug_title(path)
+        if cleaned.lower() in {"playvids", "video"}:
+            continue
+        out.append(
+            {
+                "id": parts[0],
+                "title": cleaned,
+                "url": full,
+                "site": "playvids",
+                "poster": "",
+            }
+        )
+    return out
+
+
+def import_catalog_to_site(
+    sites: list[str] | None = None,
+    max_pages: int = 100,
+    log: LogFn = print,
+    stop_event: threading.Event | None = None,
+) -> dict:
+    """Crawl newest listings and publish as outbound links (deduped + KV sync)."""
+    chosen = [s for s in (sites or list(CATALOG_SOURCES.keys())) if s in CATALOG_SOURCES]
+    if not chosen:
+        raise ValueError("No valid catalog sites selected")
+    max_pages = max(1, min(1000, int(max_pages)))
+
+    total_added = 0
+    total_skipped = 0
+    pages_done = 0
+
+    scrapers = {
+        "fpo": scrape_fpo_page,
+        "playvids": scrape_playvids_page,
+    }
+
+    for site in chosen:
+        if stop_event is not None and stop_event.is_set():
+            log("Import stopped by user.")
+            break
+        label = CATALOG_SOURCES[site]["label"]
+        log(f"=== Importing {label} (up to {max_pages} pages) ===")
+        empty_streak = 0
+        for page in range(1, max_pages + 1):
+            if stop_event is not None and stop_event.is_set():
+                log("Import stopped by user.")
+                break
+            log(f"  [{label}] page {page}/{max_pages}…")
+            try:
+                items = scrapers[site](page)
+            except Exception as exc:  # noqa: BLE001
+                log(f"  [{label}] page {page} failed: {exc}")
+                empty_streak += 1
+                if empty_streak >= 3:
+                    break
+                continue
+            if not items:
+                empty_streak += 1
+                log(f"  [{label}] page {page}: no videos")
+                if empty_streak >= 3:
+                    log(f"  [{label}] stopping after empty pages")
+                    break
+                continue
+            empty_streak = 0
+            pages_done += 1
+            result = publish_outbound_links(items, actor_name="", log=log)
+            total_added += int(result.get("added") or 0)
+            total_skipped += int(result.get("skipped") or 0)
+
+    log(
+        f"Import finished. Added {total_added}, skipped {total_skipped} duplicate(s), "
+        f"pages crawled {pages_done}."
+    )
+    return {
+        "added": total_added,
+        "skipped": total_skipped,
+        "pages": pages_done,
+        "sites": chosen,
+        "count": len(load_outbound_films()),
     }
 
 

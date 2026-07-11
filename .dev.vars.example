@@ -1,5 +1,5 @@
 # Copy to .dev.vars for local `wrangler dev` / `npm run preview` / python-script
 ADMIN_PASSWORD=your_admin_password
 BUNNY_API_KEY=your_library_access_key
-# Live Worker URL — Publish as links syncs here (no rebuild when OUTBOUND KV is bound)
+# Prefer workers.dev for Publish-as-links sync (custom domains may block script UAs)
 SITE_URL=https://shortfilmsite.YOUR_SUBDOMAIN.workers.dev

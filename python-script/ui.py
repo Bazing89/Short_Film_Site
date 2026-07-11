@@ -26,10 +26,14 @@ _state_lock = threading.Lock()
 _logs: list[str] = []
 _running = False
 _searching = False
+_importing = False
 _stop_event = threading.Event()
+_import_stop_event = threading.Event()
 _worker: threading.Thread | None = None
 _search_worker: threading.Thread | None = None
+_import_worker: threading.Thread | None = None
 _last_exit: int | None = None
+_last_import: dict | None = None
 _search_results: list[dict] = []
 _search_actor = ""
 _search_error = ""
@@ -39,7 +43,7 @@ def _parse_urls(text: str) -> list[str]:
     urls: list[str] = []
     seen: set[str] = set()
     for line in text.splitlines():
-        line = line.strip()
+        line = bunny.normalize_source_url(line.strip())
         if not line or line.startswith("#"):
             continue
         if line not in seen:
@@ -93,7 +97,9 @@ def _snapshot() -> dict:
         return {
             "running": _running,
             "searching": _searching,
+            "importing": _importing,
             "lastExit": _last_exit,
+            "lastImport": _last_import,
             "queue": _queue_display(),
             "doneCount": len(bunny.read_url_list(bunny.DONE_FILE)),
             "failedCount": len(bunny.read_url_list(bunny.FAILED_FILE)),
@@ -110,6 +116,10 @@ def _snapshot() -> dict:
             "sources": [
                 {"id": key, "label": val["label"]}
                 for key, val in bunny.SEARCH_SOURCES.items()
+            ],
+            "catalogSources": [
+                {"id": key, "label": val["label"]}
+                for key, val in bunny.CATALOG_SOURCES.items()
             ],
         }
 
@@ -154,6 +164,8 @@ def _start_worker() -> tuple[bool, str]:
             return False, "Already running"
         if _searching:
             return False, "Wait for search to finish"
+        if _importing:
+            return False, "Wait for catalog import to finish"
         urls = _load_queue()
         if not urls:
             return False, "Queue is empty — search or paste links first"
@@ -198,6 +210,8 @@ def _start_search(actor: str, sources: list[str], limit: int) -> tuple[bool, str
             return False, "Search already running"
         if _running:
             return False, "Cannot search while downloads are running"
+        if _importing:
+            return False, "Cannot search while catalog import is running"
         _searching = True
         _search_error = ""
         _search_results = []
@@ -209,25 +223,79 @@ def _start_search(actor: str, sources: list[str], limit: int) -> tuple[bool, str
     return True, "Searching"
 
 
+def _run_import(sites: list[str], max_pages: int) -> None:
+    global _importing, _import_worker, _last_import
+    try:
+        result = bunny.import_catalog_to_site(
+            sites=sites,
+            max_pages=max_pages,
+            log=_append_log,
+            stop_event=_import_stop_event,
+        )
+        with _state_lock:
+            _last_import = result
+    except Exception as exc:  # noqa: BLE001
+        _append_log(f"Import crashed: {exc}")
+        with _state_lock:
+            _last_import = {"ok": False, "error": str(exc)}
+    finally:
+        with _state_lock:
+            _importing = False
+            _import_worker = None
+
+
+def _start_import(sites: list[str], max_pages: int) -> tuple[bool, str]:
+    global _importing, _import_worker, _last_import
+    chosen = [s for s in sites if s in bunny.CATALOG_SOURCES]
+    if not chosen:
+        return False, "Select at least one site (FPO and/or Playvids)"
+    if max_pages < 1 or max_pages > 1000:
+        return False, "Max pages must be between 1 and 1000"
+    with _state_lock:
+        if _importing:
+            return False, "Import already running"
+        if _running:
+            return False, "Cannot import while downloads are running"
+        if _searching:
+            return False, "Cannot import while search is running"
+        _logs.clear()
+        _last_import = None
+        _importing = True
+        _import_stop_event.clear()
+        _import_worker = threading.Thread(
+            target=_run_import, args=(chosen, max_pages), daemon=True
+        )
+        _import_worker.start()
+    return True, "Import started"
+
+
 def _queue_search_selection(urls: list[str]) -> tuple[int, str]:
     with _state_lock:
         if _running:
             return 0, "Cannot edit queue while running"
         by_url = {r["url"]: r for r in _search_results if r.get("url")}
+        # Also index by normalized URL
+        by_norm = {
+            bunny.normalize_source_url(r["url"]): r
+            for r in _search_results
+            if r.get("url")
+        }
         actor = _search_actor
         current = _load_queue()
         meta = bunny.load_queue_meta()
-        seen = set(current)
+        seen = {bunny.normalize_source_url(u) for u in current}
         added = 0
         for url in urls:
-            item = by_url.get(url)
+            item = by_url.get(url) or by_norm.get(bunny.normalize_source_url(url))
             if not item:
                 continue
-            if url not in seen:
-                current.append(url)
-                seen.add(url)
-                added += 1
-            meta[url] = {
+            norm = bunny.normalize_source_url(item["url"])
+            if not norm or norm in seen:
+                continue
+            current.append(norm)
+            seen.add(norm)
+            added += 1
+            meta[norm] = {
                 "actor": actor or item.get("actor") or "",
                 "title": item.get("title") or "",
                 "site": item.get("site") or "",
@@ -241,6 +309,8 @@ def _publish_links(urls: list[str]) -> dict:
     with _state_lock:
         if _running:
             return {"ok": False, "error": "Cannot publish while downloads are running"}
+        if _importing:
+            return {"ok": False, "error": "Cannot publish while catalog import is running"}
         by_url = {r["url"]: r for r in _search_results if r.get("url")}
         actor = _search_actor
         items = []
@@ -562,6 +632,18 @@ PAGE = r"""<!DOCTYPE html>
       </div>
     </header>
 
+    <section class="panel" style="margin-bottom: 1.1rem;">
+      <h2>Import all from FPO / Playvids</h2>
+      <p class="hint">Crawl newest listings and publish every video as an outbound link on your site (deduped + live KV sync). Large page counts take a long time — start with 5–20 to test.</p>
+      <div class="sources" id="catalogSources"></div>
+      <div class="row" style="margin-top: 0.65rem;">
+        <label for="importPages" style="font-size: 0.85rem; color: var(--muted); white-space: nowrap;">Max pages</label>
+        <input id="importPages" type="number" min="1" max="1000" value="100" title="Pages per site (1–1000)" />
+        <button class="btn-primary" id="importStartBtn" type="button">Import all</button>
+        <button class="btn-danger" id="importStopBtn" type="button" disabled>Stop import</button>
+      </div>
+    </section>
+
     <div class="layout">
       <section class="panel">
         <h2>Find by actor</h2>
@@ -620,6 +702,7 @@ PAGE = r"""<!DOCTYPE html>
     const $ = (id) => document.getElementById(id);
     let toastTimer = null;
     let sourcesReady = false;
+    let catalogReady = false;
     let prev = {
       resultsKey: "",
       queueKey: "",
@@ -634,6 +717,22 @@ PAGE = r"""<!DOCTYPE html>
       el.classList.add("show");
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+    }
+
+    function ensureCatalogSources(sources) {
+      if (catalogReady || !sources || !sources.length) return;
+      const box = $("catalogSources");
+      box.innerHTML = sources.map((s) => `
+        <label>
+          <input type="checkbox" class="catalog-check" value="${s.id}" checked />
+          ${s.label}
+        </label>
+      `).join("");
+      catalogReady = true;
+    }
+
+    function selectedCatalogSites() {
+      return [...document.querySelectorAll(".catalog-check:checked")].map((el) => el.value);
     }
 
     async function api(path, options) {
@@ -756,7 +855,7 @@ PAGE = r"""<!DOCTYPE html>
 
     function renderStatus(state) {
       const statusKey = [
-        state.hasApiKey, state.running, state.searching,
+        state.hasApiKey, state.running, state.searching, state.importing,
         state.queue.length, state.doneCount, state.failedCount, state.outboundCount,
         state.libraryId, state.collectionId,
         (state.searchResults || []).length,
@@ -765,6 +864,7 @@ PAGE = r"""<!DOCTYPE html>
       prev.statusKey = statusKey;
 
       ensureSources(state.sources);
+      ensureCatalogSources(state.catalogSources);
       $("libraryId").textContent = state.libraryId || "—";
       $("collectionId").textContent = (state.collectionId || "—").slice(0, 8) + "…";
       $("queuedCount").textContent = state.queue.length;
@@ -773,7 +873,11 @@ PAGE = r"""<!DOCTYPE html>
 
       const keyDot = $("keyDot");
       const keyLabel = $("keyLabel");
-      if (state.running) {
+      const busy = state.running || state.searching || state.importing;
+      if (state.importing) {
+        keyDot.className = "dot busy";
+        keyLabel.textContent = "Importing catalog…";
+      } else if (state.running) {
         keyDot.className = "dot busy";
         keyLabel.textContent = "Downloading…";
       } else if (state.searching) {
@@ -785,14 +889,20 @@ PAGE = r"""<!DOCTYPE html>
       }
 
       const hasResults = (state.searchResults || []).some((r) => r.url);
-      $("searchBtn").disabled = state.running || state.searching;
-      $("queueSelectedBtn").disabled = state.running || state.searching || !hasResults;
-      $("publishLinksBtn").disabled = state.running || state.searching || !hasResults;
-      $("startBtn").disabled = state.running || state.searching || !state.queue.length || !state.hasApiKey;
+      $("searchBtn").disabled = busy;
+      $("queueSelectedBtn").disabled = busy || !hasResults;
+      $("publishLinksBtn").disabled = busy || !hasResults;
+      $("startBtn").disabled = busy || !state.queue.length || !state.hasApiKey;
       $("stopBtn").disabled = !state.running;
-      $("clearQueueBtn").disabled = state.running;
-      $("addBtn").disabled = state.running;
-      $("replaceBtn").disabled = state.running;
+      $("clearQueueBtn").disabled = busy;
+      $("addBtn").disabled = busy;
+      $("replaceBtn").disabled = busy;
+      $("importStartBtn").disabled = busy;
+      $("importStopBtn").disabled = !state.importing;
+      document.querySelectorAll(".catalog-check").forEach((el) => {
+        el.disabled = !!state.importing;
+      });
+      $("importPages").disabled = !!state.importing;
     }
 
     function render(state) {
@@ -871,7 +981,11 @@ PAGE = r"""<!DOCTYPE html>
           body: JSON.stringify({ urls }),
         });
         prev.statusKey = "";
-        toast(`Published ${data.added || 0} link(s)` + (data.synced ? " · live site synced" : " · local only"));
+        toast(
+          `Published ${data.added || 0} new` +
+          (data.skipped ? `, skipped ${data.skipped} duplicate(s)` : "") +
+          (data.synced ? " · live synced" : " · local only")
+        );
         await refresh();
       } catch (err) {
         toast(err.message || "Publish failed");
@@ -911,6 +1025,33 @@ PAGE = r"""<!DOCTYPE html>
     $("stopBtn").addEventListener("click", async () => {
       await api("/api/stop", { method: "POST", body: "{}" });
       toast("Will stop after current item");
+      await refresh();
+    });
+
+    $("importStartBtn").addEventListener("click", async () => {
+      const sites = selectedCatalogSites();
+      if (!sites.length) {
+        toast("Select FPO and/or Playvids");
+        return;
+      }
+      try {
+        prev.logKey = "";
+        await api("/api/import-catalog", {
+          method: "POST",
+          body: JSON.stringify({
+            sites,
+            maxPages: Number($("importPages").value || 100),
+          }),
+        });
+        toast("Import started — watch Activity");
+        await refresh();
+      } catch (err) {
+        toast(err.message || "Import failed to start");
+      }
+    });
+    $("importStopBtn").addEventListener("click", async () => {
+      await api("/api/import-stop", { method: "POST", body: "{}" });
+      toast("Stopping import after current page…");
       await refresh();
     });
 
@@ -991,9 +1132,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send(code, result if result.get("ok") else {"error": result.get("error", "Failed"), **result})
             return
 
+        if path == "/api/import-catalog":
+            sites = [s for s in (data.get("sites") or []) if isinstance(s, str)]
+            try:
+                max_pages = int(data.get("maxPages") or 100)
+            except (TypeError, ValueError):
+                max_pages = 100
+            ok, message = _start_import(sites, max_pages)
+            self._send(
+                200 if ok else 400,
+                {"ok": ok, "message": message, **({"error": message} if not ok else {})},
+            )
+            return
+
+        if path == "/api/import-stop":
+            _import_stop_event.set()
+            _append_log("Import stop requested — finishing current page, then pausing.")
+            self._send(200, {"ok": True})
+            return
+
         if path == "/api/queue":
             with _state_lock:
-                if _running:
+                if _running or _importing:
                     self._send(409, {"error": "Cannot edit queue while running"})
                     return
                 incoming = _parse_urls(str(data.get("text") or ""))

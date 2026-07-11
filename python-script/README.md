@@ -28,7 +28,8 @@ Opens http://127.0.0.1:8765
 3. Choose one:
    - **Publish as links** — adds title + thumbnail to the site catalog; viewers hit an ad page then go to the source site (fast, no download)
    - **Queue for Bunny download** then **Start downloads** — hosts the video on Bunny (`Actor — video title`)
-4. For **live updates without rebuild**, bind Cloudflare KV as `OUTBOUND` (see below) and set `SITE_URL` in `.dev.vars`
+4. Or use **Import all from FPO / Playvids** to crawl newest listings (set max pages) and publish every link to the site
+5. For **live updates without rebuild**, bind Cloudflare KV as `OUTBOUND` (see below) and set `SITE_URL` in `.dev.vars`
 
 ### Live outbound catalog (no rebuild)
 

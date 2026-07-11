@@ -21,17 +21,6 @@ export function FilmCard({ film }: FilmCardProps) {
           loading="lazy"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-cinema-black/80 via-transparent to-transparent" />
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-cinema-accent/90 opacity-90 transition group-hover:scale-105 group-hover:opacity-100">
-            <svg
-              className="ml-0.5 h-6 w-6 text-cinema-black"
-              fill="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path d="M8 5v14l11-7z" />
-            </svg>
-          </div>
-        </div>
         {outbound ? (
           <span className="absolute left-3 top-3 rounded bg-cinema-black/80 px-2 py-0.5 text-[10px] uppercase tracking-wide text-cinema-accent">
             External

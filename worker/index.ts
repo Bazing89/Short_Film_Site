@@ -289,13 +289,44 @@ async function saveOutboundFilms(env: Env, records: OutboundRecord[]): Promise<b
 }
 
 function outboundIdFromUrl(sourceUrl: string): string {
-  // Stable short id from URL (non-crypto hash for Worker sync context)
+  // Stable short id from normalized URL
   let hash = 2166136261;
   for (let i = 0; i < sourceUrl.length; i++) {
     hash ^= sourceUrl.charCodeAt(i);
     hash = Math.imul(hash, 16777619);
   }
   return `out_${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function normalizeSourceUrl(url: string): string {
+  const raw = (url || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return raw.replace(/\/+$/, "");
+    let host = parsed.hostname.toLowerCase();
+    if (host.startsWith("www.")) host = host.slice(4);
+    let path = parsed.pathname || "/";
+    path = path.replace(/\/{2,}/g, "/");
+    if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+    const drop = new Set([
+      "utm_source",
+      "utm_medium",
+      "utm_campaign",
+      "utm_term",
+      "utm_content",
+      "fbclid",
+      "gclid",
+    ]);
+    const params = new URLSearchParams(parsed.search);
+    for (const key of [...params.keys()]) {
+      if (drop.has(key.toLowerCase())) params.delete(key);
+    }
+    const qs = params.toString();
+    return `${parsed.protocol}//${host}${path}${qs ? `?${qs}` : ""}`;
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
 }
 
 async function bunnyFetch(env: Env, url: string, title?: string) {
@@ -595,11 +626,16 @@ async function handleAdminApi(
     }
 
     const normalized: OutboundRecord[] = [];
+    const seenIds = new Set<string>();
+    const seenUrls = new Set<string>();
     for (const item of incoming) {
-      const sourceUrl = String(item.sourceUrl || "").trim();
-      if (!sourceUrl) continue;
+      const sourceUrl = normalizeSourceUrl(String(item.sourceUrl || ""));
+      if (!sourceUrl || seenUrls.has(sourceUrl)) continue;
       const id =
         String(item.id || "").trim() || outboundIdFromUrl(sourceUrl);
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+      seenUrls.add(sourceUrl);
       normalized.push({
         id,
         title: cleanVideoTitle(String(item.title || sourceUrl)),
@@ -617,7 +653,22 @@ async function handleAdminApi(
       merged = normalized;
     } else {
       const byId = new Map(existing.map((r) => [r.id, r]));
-      for (const rec of normalized) byId.set(rec.id, rec);
+      const byUrl = new Map(
+        existing.map((r) => [normalizeSourceUrl(r.sourceUrl), r.id])
+      );
+      for (const rec of normalized) {
+        const existingId = byUrl.get(rec.sourceUrl);
+        if (existingId && existingId !== rec.id) {
+          // Same URL already stored under another id — keep existing, skip duplicate
+          continue;
+        }
+        if (byId.has(rec.id)) {
+          // Already present — do not overwrite on non-replace posts
+          continue;
+        }
+        byId.set(rec.id, rec);
+        byUrl.set(rec.sourceUrl, rec.id);
+      }
       merged = [...byId.values()];
     }
 
