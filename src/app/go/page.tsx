@@ -2,7 +2,6 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import Link from "next/link";
 import { BackLink } from "@/components/PageHeader";
 import type { Film } from "@/data/films";
 import { fetchFilm } from "@/lib/filmsApi";
@@ -142,12 +141,12 @@ function GoContent() {
               <p className="text-sm text-cinema-muted">
                 Redirecting in <span className="text-cinema-text">{seconds}</span>…
               </p>
-              <Link
-                href={film.sourceUrl}
+              <a
+                href={film.sourceUrl || "#"}
                 className="inline-flex rounded-full border border-cinema-border px-5 py-2.5 text-sm text-cinema-text transition hover:border-cinema-accent/50"
               >
                 Continue now
-              </Link>
+              </a>
             </div>
           )}
         </div>
