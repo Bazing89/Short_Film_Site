@@ -1,17 +1,18 @@
 import type { Metadata } from "next";
-import { ModelsCatalog } from "@/components/ModelsCatalog";
+import { PageHeader } from "@/components/PageHeader";
 
 export const metadata: Metadata = {
   title: "BOP Models",
-  description: "Browse models from the MyFPO catalog.",
+  description: "BOP Models — coming soon.",
 };
 
 export default function BopModelsPage() {
   return (
-    <ModelsCatalog
-      site="fpo"
-      title="BOP Models"
-      subtitle="Performers featured in MyFPO (fpo.xxx) videos."
-    />
+    <>
+      <PageHeader title="BOP Models" />
+      <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
+        <p className="text-center text-sm text-cinema-muted">Coming soon.</p>
+      </div>
+    </>
   );
 }

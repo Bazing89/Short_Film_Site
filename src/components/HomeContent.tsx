@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { VideoCard } from "@/components/VideoCard";
 import { filterAndSortFilms, type Film, type SortOption } from "@/data/films";
@@ -9,6 +10,12 @@ const sortOptions: { value: SortOption; label: string }[] = [
   { value: "most-viewed", label: "Most Viewed" },
   { value: "newest", label: "Newest" },
   { value: "oldest", label: "Oldest" },
+];
+
+const pageLinks = [
+  { href: "/videos", label: "Videos" },
+  { href: "/models", label: "Models" },
+  { href: "/bop-models", label: "BOP Models" },
 ];
 
 export function HomeContent() {
@@ -47,6 +54,18 @@ export function HomeContent() {
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+      <nav className="mb-4 flex flex-wrap gap-2">
+        {pageLinks.map((link) => (
+          <Link
+            key={link.href}
+            href={link.href}
+            className="rounded-full border border-cinema-border bg-cinema-card px-4 py-2 text-sm text-cinema-text transition-colors hover:border-cinema-accent/50 hover:text-cinema-accent"
+          >
+            {link.label}
+          </Link>
+        ))}
+      </nav>
+
       <div className="relative">
         <svg
           className="absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-cinema-muted"
