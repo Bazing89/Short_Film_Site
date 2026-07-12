@@ -10,6 +10,8 @@ import {
   mergeImportedAndFilmModels,
 } from "@/lib/siteModelsApi";
 
+const MODELS_PAGE_SIZE = 80;
+
 interface ModelsCatalogProps {
   site?: "fpo";
   title: string;
@@ -21,6 +23,7 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [models, setModels] = useState([] as ModelSummary[]);
+  const [visibleCount, setVisibleCount] = useState(MODELS_PAGE_SIZE);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,7 +35,8 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
         ]);
         if (!cancelled) {
           const fromFilms = deriveModels(films, site ? { site } : undefined);
-          setModels(mergeImportedAndFilmModels(imported, fromFilms, films));
+          setModels(mergeImportedAndFilmModels(imported, fromFilms));
+          setVisibleCount(MODELS_PAGE_SIZE);
           setError("");
         }
       } catch (err) {
@@ -55,6 +59,17 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
       model.name.toLowerCase().includes(normalized)
     );
   }, [models, query]);
+
+  useEffect(() => {
+    setVisibleCount(MODELS_PAGE_SIZE);
+  }, [query]);
+
+  const visibleModels = useMemo(
+    () => displayedModels.slice(0, visibleCount),
+    [displayedModels, visibleCount]
+  );
+
+  const hasMore = visibleCount < displayedModels.length;
 
   return (
     <>
@@ -98,11 +113,26 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
             </p>
 
             {displayedModels.length > 0 ? (
-              <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                {displayedModels.map((model) => (
-                  <ModelCard key={model.slug} model={model} site={site} />
-                ))}
-              </div>
+              <>
+                <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                  {visibleModels.map((model) => (
+                    <ModelCard key={model.slug} model={model} site={site} />
+                  ))}
+                </div>
+                {hasMore ? (
+                  <div className="mt-8 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setVisibleCount((count) => count + MODELS_PAGE_SIZE)
+                      }
+                      className="rounded-lg border border-cinema-border bg-cinema-card px-5 py-2.5 text-sm text-cinema-text transition-colors hover:border-cinema-accent hover:text-cinema-accent"
+                    >
+                      Load more ({displayedModels.length - visibleCount} remaining)
+                    </button>
+                  </div>
+                ) : null}
+              </>
             ) : (
               <p className="mt-10 text-center text-sm text-cinema-muted">
                 No models found. Import from the Python UI or publish videos with actor names.
