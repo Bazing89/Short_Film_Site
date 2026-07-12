@@ -147,9 +147,14 @@ function collectionId(env: Env): string {
   return env.BUNNY_COLLECTION_ID || DEFAULT_COLLECTION;
 }
 
+function asString(value: unknown): string {
+  if (value == null) return "";
+  return typeof value === "string" ? value : String(value);
+}
+
 /** Filename → display title: strip .mp4 and trailing arbitrary numbers/IDs */
-function cleanVideoTitle(raw: string): string {
-  let title = (raw || "").trim();
+function cleanVideoTitle(raw: unknown): string {
+  let title = asString(raw).trim();
   title = title.replace(/^.*[\\/]/, "");
   title = title.replace(/\.(mp4|mov|mkv|webm|m4v|avi)$/i, "");
   title = title.replace(/\s*\[[^\]]*\]\s*$/g, "");
@@ -157,7 +162,8 @@ function cleanVideoTitle(raw: string): string {
   title = title.replace(/[\s._-]+\d{3,}\s*$/g, "");
   title = title.replace(/\s+\d+\s*$/g, "");
   title = title.replace(/[\s._-]+$/g, "").replace(/\s{2,}/g, " ").trim();
-  return title || raw.trim() || "Untitled";
+  const fallback = asString(raw).trim();
+  return title || fallback || "Untitled";
 }
 
 function formatRuntime(seconds?: number): string {
@@ -944,8 +950,8 @@ async function handleThumbnail(
   return new Response(upstream.body, { status: 200, headers });
 }
 
-function slugifyFilmTitle(title: string): string {
-  const slug = (title || "")
+function slugifyFilmTitle(title: unknown): string {
+  const slug = asString(title)
     .toLowerCase()
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
@@ -960,8 +966,8 @@ function filmWatchPath(film: Pick<Film, "title" | "slug" | "streamId">): string 
   return `/watch/${slugifyFilmTitle(film.title)}/${encodeURIComponent(id)}`;
 }
 
-function escapeHtml(value: string): string {
-  return (value || "")
+function escapeHtml(value: unknown): string {
+  return asString(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -1100,9 +1106,9 @@ function renderWatchPageHtml(film: Film, origin: string): string {
   <main>
     <article>
       <h1>${escapeHtml(title)}</h1>
-      <p class="meta">${[film.year || "", film.runtime || "", outbound ? "External" : ""]
-        .filter(Boolean)
-        .map(escapeHtml)
+      <p class="meta">${[film.year, film.runtime, outbound ? "External" : ""]
+        .filter((part) => part !== "" && part != null)
+        .map((part) => escapeHtml(part))
         .join(" · ")}</p>
       ${playerBlock}
       <p class="desc">${escapeHtml(description)}</p>
