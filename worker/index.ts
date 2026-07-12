@@ -281,6 +281,65 @@ function toOutboundFilm(record: OutboundRecord): Film {
   };
 }
 
+/** Smaller catalog payload for GET /api/films (thousands of titles). */
+function toOutboundFilmListItem(record: OutboundRecord): Film {
+  const title = cleanVideoTitle(record.title || record.sourceUrl);
+  const year = record.dateAdded
+    ? new Date(record.dateAdded).getFullYear()
+    : new Date().getFullYear();
+  return {
+    title,
+    slug: record.id,
+    description: title,
+    synopsis: title,
+    poster: outboundPoster(record),
+    streamId: record.id,
+    embedUrl: "",
+    runtime: "",
+    year,
+    genre: record.site || "link",
+    views: 0,
+    credits: [],
+    dateUploaded: record.dateAdded,
+    kind: "outbound",
+    sourceUrl: record.sourceUrl,
+    actor: record.actor,
+    site: record.site,
+  };
+}
+
+function toFilmListItem(film: Film): Film {
+  return {
+    title: film.title,
+    slug: film.slug,
+    description: film.description || film.title,
+    synopsis: film.description || film.title,
+    poster: film.poster,
+    streamId: film.streamId,
+    embedUrl: film.embedUrl || "",
+    runtime: film.runtime,
+    year: film.year,
+    genre: film.genre,
+    views: film.views,
+    credits: [],
+    dateUploaded: film.dateUploaded,
+    kind: film.kind,
+    sourceUrl: film.sourceUrl,
+    actor: film.actor,
+    site: film.site,
+  };
+}
+
+function toSiteModelListItem(record: SiteModelRecord): SiteModelRecord {
+  return {
+    id: record.id,
+    name: record.name,
+    slug: record.slug,
+    poster: record.poster,
+    dateAdded: record.dateAdded,
+  };
+}
+
 async function loadOutboundFromAssets(request: Request, env: Env): Promise<OutboundRecord[]> {
   try {
     const assetUrl = new URL("/outbound-films.json", request.url);
@@ -510,10 +569,10 @@ async function handlePublicFilmsApi(
     return json({ ok: false, error: "Method not allowed" }, 405);
   }
 
-  const outboundRecords = await loadOutboundFilms(request, env);
-  const outboundFilms = outboundRecords.map(toOutboundFilm);
-
   try {
+    const outboundRecords = await loadOutboundFilms(request, env);
+    const outboundFilms = outboundRecords.map(toOutboundFilmListItem);
+
     if (pathname === "/api/films") {
       let bunnyFilms: Film[] = [];
       const configError = requireConfig(env);
@@ -522,7 +581,7 @@ async function handlePublicFilmsApi(
           const videos = await bunnyListCollectionVideos(env);
           bunnyFilms = videos
             .filter((v) => v.status === 4)
-            .map((v) => toFilm(env, v));
+            .map((v) => toFilmListItem(toFilm(env, v)));
         } catch (err) {
           const message =
             err instanceof Error ? err.message : "Bunny list failed";
@@ -1114,97 +1173,114 @@ Sitemap: ${origin}/sitemap.xml
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    const origin = url.origin;
+    try {
+      const url = new URL(request.url);
+      const origin = url.origin;
 
-    if (url.pathname === "/api/poster") {
-      return handlePosterProxy(request);
-    }
-
-    if (url.pathname.startsWith("/api/thumbnail/")) {
-      return handleThumbnail(request, env, url.pathname);
-    }
-
-    if (url.pathname === "/api/films" || url.pathname.startsWith("/api/films/")) {
-      return handlePublicFilmsApi(request, env, url.pathname);
-    }
-
-    if (url.pathname === "/api/models") {
-      if (request.method !== "GET") {
-        return json({ ok: false, error: "Method not allowed" }, 405);
+      if (url.pathname === "/api/poster") {
+        return handlePosterProxy(request);
       }
-      const models = await loadSiteModels(request, env);
-      return jsonFresh({ ok: true, count: models.length, models });
-    }
 
-    if (url.pathname === "/api/bop-models") {
-      return jsonFresh({ ok: true, count: 0, models: [] });
-    }
+      if (url.pathname.startsWith("/api/thumbnail/")) {
+        return handleThumbnail(request, env, url.pathname);
+      }
 
-    if (url.pathname.startsWith("/api/admin")) {
-      return handleAdminApi(request, env, url.pathname);
-    }
+      if (url.pathname === "/api/films" || url.pathname.startsWith("/api/films/")) {
+        return handlePublicFilmsApi(request, env, url.pathname);
+      }
 
-    if (url.pathname === "/robots.txt") {
-      return new Response(renderRobotsTxt(origin), {
-        headers: {
-          "content-type": "text/plain; charset=utf-8",
-          "cache-control": "public, max-age=3600",
-        },
-      });
-    }
+      if (url.pathname === "/api/models") {
+        if (request.method !== "GET") {
+          return json({ ok: false, error: "Method not allowed" }, 405);
+        }
+        try {
+          const models = (await loadSiteModels(request, env)).map(
+            toSiteModelListItem
+          );
+          return jsonFresh({ ok: true, count: models.length, models });
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : "Failed to load models";
+          return json({ ok: false, error: message, models: [] }, 500);
+        }
+      }
 
-    if (url.pathname === "/sitemap.xml") {
-      try {
-        const films = await listAllFilms(request, env);
-        return new Response(renderSitemapXml(films, origin), {
+      if (url.pathname === "/api/bop-models") {
+        return jsonFresh({ ok: true, count: 0, models: [] });
+      }
+
+      if (url.pathname.startsWith("/api/admin")) {
+        return handleAdminApi(request, env, url.pathname);
+      }
+
+      if (url.pathname === "/robots.txt") {
+        return new Response(renderRobotsTxt(origin), {
           headers: {
-            "content-type": "application/xml; charset=utf-8",
-            "cache-control": "public, max-age=300",
+            "content-type": "text/plain; charset=utf-8",
+            "cache-control": "public, max-age=3600",
           },
         });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Sitemap error";
-        return new Response(`Sitemap error: ${message}`, { status: 500 });
       }
-    }
 
-    // SEO watch pages: /watch/{title-slug}/{id} or /watch/{id}
-    const watchMatch = url.pathname.match(/^\/watch\/(?:[^/]+\/)?([^/]+)\/?$/);
-    if (watchMatch) {
-      const id = decodeURIComponent(watchMatch[1] || "");
-      if (!id) {
-        return new Response("Not found", { status: 404 });
+      if (url.pathname === "/sitemap.xml") {
+        try {
+          const films = await listAllFilms(request, env);
+          return new Response(renderSitemapXml(films, origin), {
+            headers: {
+              "content-type": "application/xml; charset=utf-8",
+              "cache-control": "public, max-age=300",
+            },
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Sitemap error";
+          return new Response(`Sitemap error: ${message}`, { status: 500 });
+        }
       }
-      const film = await findFilmById(request, env, id);
-      if (!film) {
-        return new Response("Video not found", {
-          status: 404,
-          headers: { "content-type": "text/plain; charset=utf-8" },
+
+      // SEO watch pages: /watch/{title-slug}/{id} or /watch/{id}
+      const watchMatch = url.pathname.match(/^\/watch\/(?:[^/]+\/)?([^/]+)\/?$/);
+      if (watchMatch) {
+        const id = decodeURIComponent(watchMatch[1] || "");
+        if (!id) {
+          return new Response("Not found", { status: 404 });
+        }
+        const film = await findFilmById(request, env, id);
+        if (!film) {
+          return new Response("Video not found", {
+            status: 404,
+            headers: { "content-type": "text/plain; charset=utf-8" },
+          });
+        }
+        // Prefer canonical title slug in the URL
+        const canonicalPath = filmWatchPath(film);
+        if (url.pathname.replace(/\/$/, "") !== canonicalPath) {
+          return Response.redirect(`${origin}${canonicalPath}`, 301);
+        }
+        return new Response(renderWatchPageHtml(film, origin), {
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "public, max-age=120",
+          },
         });
       }
-      // Prefer canonical title slug in the URL
-      const canonicalPath = filmWatchPath(film);
-      if (url.pathname.replace(/\/$/, "") !== canonicalPath) {
-        return Response.redirect(`${origin}${canonicalPath}`, 301);
+
+      // Old share links: /play?id=… → canonical /watch/…
+      if (url.pathname === "/play" && url.searchParams.get("id")) {
+        const id = url.searchParams.get("id") || "";
+        const film = await findFilmById(request, env, id);
+        if (film) {
+          return Response.redirect(`${origin}${filmWatchPath(film)}`, 301);
+        }
       }
-      return new Response(renderWatchPageHtml(film, origin), {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "public, max-age=120",
-        },
+
+      return env.ASSETS.fetch(request);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Worker error";
+      console.error("Unhandled worker error:", err);
+      return new Response(`Worker error: ${message}`, {
+        status: 500,
+        headers: { "content-type": "text/plain; charset=utf-8" },
       });
     }
-
-    // Old share links: /play?id=… → canonical /watch/…
-    if (url.pathname === "/play" && url.searchParams.get("id")) {
-      const id = url.searchParams.get("id") || "";
-      const film = await findFilmById(request, env, id);
-      if (film) {
-        return Response.redirect(`${origin}${filmWatchPath(film)}`, 301);
-      }
-    }
-
-    return env.ASSETS.fetch(request);
   },
 };
