@@ -27,13 +27,17 @@ _logs: list[str] = []
 _running = False
 _searching = False
 _importing = False
+_importing_models = False
 _stop_event = threading.Event()
 _import_stop_event = threading.Event()
+_model_import_stop_event = threading.Event()
 _worker: threading.Thread | None = None
 _search_worker: threading.Thread | None = None
 _import_worker: threading.Thread | None = None
+_model_import_worker: threading.Thread | None = None
 _last_exit: int | None = None
 _last_import: dict | None = None
+_last_model_import: dict | None = None
 _search_results: list[dict] = []
 _search_actor = ""
 _search_error = ""
@@ -98,12 +102,15 @@ def _snapshot() -> dict:
             "running": _running,
             "searching": _searching,
             "importing": _importing,
+            "importingModels": _importing_models,
             "lastExit": _last_exit,
             "lastImport": _last_import,
+            "lastModelImport": _last_model_import,
             "queue": _queue_display(),
             "doneCount": len(bunny.read_url_list(bunny.DONE_FILE)),
             "failedCount": len(bunny.read_url_list(bunny.FAILED_FILE)),
             "outboundCount": len(outbound),
+            "modelsCount": len(bunny.load_site_models()),
             "logs": list(_logs[-400:]),
             "libraryId": bunny.LIBRARY_ID,
             "collectionId": bunny.COLLECTION_ID,
@@ -166,6 +173,8 @@ def _start_worker() -> tuple[bool, str]:
             return False, "Wait for search to finish"
         if _importing:
             return False, "Wait for catalog import to finish"
+        if _importing_models:
+            return False, "Wait for model import to finish"
         urls = _load_queue()
         if not urls:
             return False, "Queue is empty — search or paste links first"
@@ -183,6 +192,9 @@ def _run_search(actor: str, sources: list[str], limit: int) -> None:
         results = bunny.search_actor_videos(
             actor, sources=sources or None, limit_per_source=limit
         )
+        valid = [r for r in results if r.get("url") and not r.get("error")]
+        if valid:
+            bunny.upsert_model_from_actor_search(actor, valid, log=_append_log)
         with _state_lock:
             _search_results = results
             _search_error = "" if results else "No videos found for that name."
@@ -212,6 +224,8 @@ def _start_search(actor: str, sources: list[str], limit: int) -> tuple[bool, str
             return False, "Cannot search while downloads are running"
         if _importing:
             return False, "Cannot search while catalog import is running"
+        if _importing_models:
+            return False, "Cannot search while model import is running"
         _searching = True
         _search_error = ""
         _search_results = []
@@ -259,6 +273,8 @@ def _start_import(
             return False, "Import already running"
         if _running:
             return False, "Cannot import while downloads are running"
+        if _importing_models:
+            return False, "Cannot import while model import is running"
         if _searching:
             return False, "Cannot import while search is running"
         _logs.clear()
@@ -272,6 +288,56 @@ def _start_import(
         )
         _import_worker.start()
     return True, "Import started"
+
+
+def _run_model_import(list_url: str, max_pages: int) -> None:
+    global _importing_models, _model_import_worker, _last_model_import
+    try:
+        result = bunny.import_models_from_url(
+            list_url,
+            max_pages=max_pages,
+            log=_append_log,
+            stop_event=_model_import_stop_event,
+        )
+        with _state_lock:
+            _last_model_import = result
+    except Exception as exc:  # noqa: BLE001
+        _append_log(f"Model import crashed: {exc}")
+        with _state_lock:
+            _last_model_import = {"ok": False, "error": str(exc)}
+    finally:
+        with _state_lock:
+            _importing_models = False
+            _model_import_worker = None
+
+
+def _start_model_import(list_url: str, max_pages: int) -> tuple[bool, str]:
+    global _importing_models, _model_import_worker, _last_model_import
+    list_url = (list_url or "").strip()
+    if not list_url:
+        return False, "Enter a models listing URL"
+    if max_pages < 1 or max_pages > 200:
+        return False, "Max pages must be between 1 and 200"
+    with _state_lock:
+        if _importing_models:
+            return False, "Model import already running"
+        if _importing:
+            return False, "Cannot import models while catalog import is running"
+        if _running:
+            return False, "Cannot import models while downloads are running"
+        if _searching:
+            return False, "Cannot import models while search is running"
+        _logs.clear()
+        _last_model_import = None
+        _importing_models = True
+        _model_import_stop_event.clear()
+        _model_import_worker = threading.Thread(
+            target=_run_model_import,
+            args=(list_url, max_pages),
+            daemon=True,
+        )
+        _model_import_worker.start()
+    return True, "Model import started"
 
 
 def _queue_search_selection(urls: list[str]) -> tuple[int, str]:
@@ -316,6 +382,8 @@ def _publish_links(urls: list[str]) -> dict:
             return {"ok": False, "error": "Cannot publish while downloads are running"}
         if _importing:
             return {"ok": False, "error": "Cannot publish while catalog import is running"}
+        if _importing_models:
+            return {"ok": False, "error": "Cannot publish while model import is running"}
         by_url = {r["url"]: r for r in _search_results if r.get("url")}
         actor = _search_actor
         items = []
@@ -650,6 +718,19 @@ PAGE = r"""<!DOCTYPE html>
       </div>
     </section>
 
+    <section class="panel" style="margin-bottom: 1.1rem;">
+      <h2>Import models</h2>
+      <p class="hint">Paste a site <strong>/models</strong> listing URL (e.g. <code>fpo.xxx/models/</code> or <code>girlcum.com/models</code>). Imports into the site <strong>Models</strong> page. Public HTML listings work best; JS-only sites may return 0 models.</p>
+      <div class="row" style="margin-top: 0.65rem;">
+        <input class="actor-input" id="modelsUrl" type="url" placeholder="https://girlcum.com/models" />
+        <label for="modelsPages" style="font-size: 0.85rem; color: var(--muted); white-space: nowrap;">Max pages</label>
+        <input id="modelsPages" type="number" min="1" max="200" value="10" title="Pages to crawl (1–200)" style="width: 5rem;" />
+        <button class="btn-primary" id="importModelsBtn" type="button">Import models</button>
+        <button class="btn-danger" id="importModelsStopBtn" type="button" disabled>Stop</button>
+      </div>
+      <p class="hint" style="margin-top: 0.65rem;">Models on site: <strong id="modelsCount">0</strong></p>
+    </section>
+
     <div class="layout">
       <section class="panel">
         <h2>Find by actor</h2>
@@ -659,7 +740,7 @@ PAGE = r"""<!DOCTYPE html>
           <button class="btn-primary" id="searchBtn" type="button">Search</button>
         </div>
         <div class="sources" id="sources"></div>
-        <p class="hint">Searches selected sites. <strong>Publish as links</strong> = show on site with thumbnail + ad redirect (fast). <strong>Queue selected</strong> + Start = download into Bunny.</p>
+        <p class="hint">Searches selected sites. The actor is auto-added to the site <strong>Models</strong> page when results are found. <strong>Publish as links</strong> = show on site with thumbnail + ad redirect (fast). <strong>Queue selected</strong> + Start = download into Bunny.</p>
 
         <div class="actions" style="margin-top: 0.85rem;">
           <button class="btn-secondary" id="selectAllBtn" type="button">Select all</button>
@@ -861,8 +942,9 @@ PAGE = r"""<!DOCTYPE html>
 
     function renderStatus(state) {
       const statusKey = [
-        state.hasApiKey, state.running, state.searching, state.importing,
+        state.hasApiKey, state.running, state.searching, state.importing, state.importingModels,
         state.queue.length, state.doneCount, state.failedCount, state.outboundCount,
+        state.modelsCount,
         state.libraryId, state.collectionId,
         (state.searchResults || []).length,
       ].join("|");
@@ -875,12 +957,16 @@ PAGE = r"""<!DOCTYPE html>
       $("collectionId").textContent = (state.collectionId || "—").slice(0, 8) + "…";
       $("queuedCount").textContent = state.queue.length;
       $("outboundCount").textContent = state.outboundCount || 0;
+      $("modelsCount").textContent = state.modelsCount || 0;
       $("doneCount").textContent = state.doneCount;
 
       const keyDot = $("keyDot");
       const keyLabel = $("keyLabel");
-      const busy = state.running || state.searching || state.importing;
-      if (state.importing) {
+      const busy = state.running || state.searching || state.importing || state.importingModels;
+      if (state.importingModels) {
+        keyDot.className = "dot busy";
+        keyLabel.textContent = "Importing models…";
+      } else if (state.importing) {
         keyDot.className = "dot busy";
         keyLabel.textContent = "Importing catalog…";
       } else if (state.running) {
@@ -910,6 +996,10 @@ PAGE = r"""<!DOCTYPE html>
         el.disabled = !!state.importing;
       });
       $("importPages").disabled = !!state.importing;
+      $("importModelsBtn").disabled = busy;
+      $("importModelsStopBtn").disabled = !state.importingModels;
+      $("modelsUrl").disabled = !!state.importingModels;
+      $("modelsPages").disabled = !!state.importingModels;
     }
 
     function render(state) {
@@ -1066,6 +1156,33 @@ PAGE = r"""<!DOCTYPE html>
       await refresh();
     });
 
+    $("importModelsBtn").addEventListener("click", async () => {
+      const url = $("modelsUrl").value.trim();
+      if (!url) {
+        toast("Enter a models listing URL");
+        return;
+      }
+      try {
+        await api("/api/import-models", {
+          method: "POST",
+          body: JSON.stringify({
+            url,
+            maxPages: Number($("modelsPages").value || 10),
+          }),
+        });
+        toast("Importing models…");
+        await refresh();
+      } catch (err) {
+        toast(err.message || "Model import failed");
+      }
+    });
+
+    $("importModelsStopBtn").addEventListener("click", async () => {
+      await api("/api/import-models-stop", { method: "POST", body: "{}" });
+      toast("Stopping model import…");
+      await refresh();
+    });
+
     refresh();
     setInterval(refresh, 1500);
   </script>
@@ -1163,9 +1280,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True})
             return
 
+        if path == "/api/import-models":
+            list_url = str(data.get("url") or "").strip()
+            try:
+                max_pages = int(data.get("maxPages") or 10)
+            except (TypeError, ValueError):
+                max_pages = 10
+            ok, message = _start_model_import(list_url, max_pages)
+            self._send(
+                200 if ok else 400,
+                {"ok": ok, "message": message, **({"error": message} if not ok else {})},
+            )
+            return
+
+        if path == "/api/import-models-stop":
+            _model_import_stop_event.set()
+            _append_log("Model import stop requested — finishing current page, then pausing.")
+            self._send(200, {"ok": True})
+            return
+
         if path == "/api/queue":
             with _state_lock:
-                if _running or _importing:
+                if _running or _importing or _importing_models:
                     self._send(409, {"error": "Cannot edit queue while running"})
                     return
                 incoming = _parse_urls(str(data.get("text") or ""))

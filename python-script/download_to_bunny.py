@@ -42,10 +42,15 @@ FAILED_FILE = HERE / "failed.txt"
 DOWNLOAD_DIR = HERE / "downloads"
 OUTBOUND_PUBLIC = ROOT / "public" / "outbound-films.json"
 OUTBOUND_OUT = ROOT / "out" / "outbound-films.json"
+MODELS_PUBLIC = ROOT / "public" / "models.json"
+MODELS_OUT = ROOT / "out" / "models.json"
+LEGACY_BOP_MODELS_PUBLIC = ROOT / "public" / "bop-models.json"
+LEGACY_BOP_MODELS_OUT = ROOT / "out" / "bop-models.json"
 OUTBOUND_KV_ID = os.environ.get(
     "OUTBOUND_KV_ID", "0c0ad6ce804246e9b95d954674860e36"
 )
 OUTBOUND_KV_KEY = "outbound-films"
+MODELS_KV_KEY = "site-models"
 LIBRARY_ID = os.environ.get("BUNNY_LIBRARY_ID", "700551")
 COLLECTION_ID = os.environ.get(
     "BUNNY_COLLECTION_ID", "98f0b8d8-336d-4ab9-9c2c-513c29815305"
@@ -80,6 +85,10 @@ SEARCH_SOURCES = {
     "fpo": {
         "label": "MyFPO",
         "url": lambda q: f"https://www.fpo.xxx/search/{urllib.parse.quote_plus(q)}/",
+    },
+    "eporner": {
+        "label": "Eporner",
+        "url": lambda q: f"https://www.eporner.com/search/{urllib.parse.quote_plus(q)}/",
     },
 }
 
@@ -357,6 +366,58 @@ def _parse_fpo(html: str, limit: int) -> list[dict]:
                 "url": url,
                 "site": "fpo",
                 "poster": thumb_map.get(url, ""),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_eporner(html: str, limit: int) -> list[dict]:
+    pairs = re.findall(
+        r'<p class="mbtit"><a href="(/video-[^"]+)">([^<]+)</a>',
+        html,
+        flags=re.I,
+    )
+    if not pairs:
+        pairs = [
+            (path, _slug_title(path))
+            for path in re.findall(r'href="(/video-[^"]+)"', html, flags=re.I)
+        ]
+    thumb_map: dict[str, str] = {}
+    for path, thumb in re.findall(
+        r'href="(/video-[^"]+)"[^>]*><img src="(https?://[^"]+)"',
+        html,
+        flags=re.I,
+    ):
+        thumb_map.setdefault(path.split("?")[0], thumb)
+    for path, thumb in re.findall(
+        r'src="(https?://[^"]+)"[^>]*alt="[^"]*"[^>]*/></a><div class="mvhdico"[^>]*>[^<]*</div></div></div><div class="mbunder"><p class="mbtit"><a href="(/video-[^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(path.split("?")[0], thumb)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for path, title in pairs:
+        path = path.split("?")[0]
+        url = "https://www.eporner.com" + path
+        if url in seen:
+            continue
+        seen.add(url)
+        cleaned = html_lib.unescape(title).strip()
+        if cleaned.lower() in {"eporner", "video"}:
+            continue
+        out.append(
+            {
+                "id": path.rstrip("/").split("/")[-2]
+                if path.rstrip("/").count("/") >= 2
+                else path,
+                "title": cleaned or _slug_title(path),
+                "url": url,
+                "site": "eporner",
+                "poster": thumb_map.get(path, ""),
             }
         )
         if len(out) >= limit:
@@ -834,11 +895,586 @@ def import_catalog_to_site(
     }
 
 
+def model_slug_from_name(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    return slug[:80] or "model"
+
+
+def model_id_for_profile(profile_url: str, name: str = "") -> str:
+    parsed = urllib.parse.urlsplit(profile_url or "")
+    parts = [p for p in parsed.path.rstrip("/").split("/") if p]
+    if parts:
+        return parts[-1][:80]
+    return model_slug_from_name(name) or "model"
+
+
+def _normalize_model_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+def _model_record_keys(record: dict) -> set[str]:
+    keys: set[str] = set()
+    profile = str(record.get("profileUrl") or "").rstrip("/")
+    if profile:
+        keys.add(f"url:{profile}")
+    slug = str(record.get("slug") or model_slug_from_name(str(record.get("name") or "")))
+    if slug:
+        keys.add(f"slug:{slug.lower()}")
+    name = _normalize_model_name(str(record.get("name") or ""))
+    if name:
+        keys.add(f"name:{name}")
+    model_id = str(record.get("id") or "").strip().lower()
+    if model_id:
+        keys.add(f"id:{model_id}")
+    return keys
+
+
+def load_site_models() -> list[dict]:
+    for path in (MODELS_PUBLIC, MODELS_OUT, LEGACY_BOP_MODELS_PUBLIC, LEGACY_BOP_MODELS_OUT):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, list):
+            return data
+    return []
+
+
+def save_site_models(records: list[dict]) -> None:
+    payload = json.dumps(records, indent=2, ensure_ascii=False) + "\n"
+    MODELS_PUBLIC.parent.mkdir(parents=True, exist_ok=True)
+    MODELS_PUBLIC.write_text(payload, encoding="utf-8")
+    if MODELS_OUT.parent.exists():
+        MODELS_OUT.write_text(payload, encoding="utf-8")
+
+
+def sync_site_models_to_live_site(models: list[dict], log: LogFn = print) -> dict:
+    tmp_path = HERE / ".models-sync.json"
+    try:
+        tmp_path.write_text(json.dumps(models, ensure_ascii=False), encoding="utf-8")
+        log(f"  Syncing {len(models)} model(s) to Cloudflare KV…")
+        cmd = [
+            "npx",
+            "--yes",
+            "wrangler@4",
+            "kv",
+            "key",
+            "put",
+            MODELS_KV_KEY,
+            f"--namespace-id={OUTBOUND_KV_ID}",
+            f"--path={tmp_path}",
+            "--remote",
+        ]
+        result = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            shell=os.name == "nt",
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "wrangler kv put failed").strip()
+            return {"ok": False, "error": detail[:500]}
+        log(f"  Live KV updated ({len(models)} models).")
+        return {"ok": True, "count": len(models), "method": "wrangler-kv"}
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "error": "npx/wrangler not found. Install Node.js and run: npx wrangler login",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# Backward-compatible aliases for older UI code paths.
+load_bop_models = load_site_models
+save_bop_models = save_site_models
+sync_bop_models_to_live_site = sync_site_models_to_live_site
+
+
+def _model_item_dedupe_keys(item: dict) -> set[str]:
+    name = str(item.get("name") or "").strip()
+    profile = str(item.get("profileUrl") or "").rstrip("/")
+    slug = model_slug_from_name(name)
+    keys: set[str] = set()
+    if profile:
+        keys.add(f"url:{profile}")
+    if slug:
+        keys.add(f"slug:{slug.lower()}")
+    norm_name = _normalize_model_name(name)
+    if norm_name:
+        keys.add(f"name:{norm_name}")
+    return keys
+
+
+def _merge_model_records(
+    existing: list[dict], scraped: list[dict], now: str
+) -> tuple[list[dict], int, int]:
+    seen_keys: set[str] = set()
+    merged: list[dict] = []
+
+    for record in existing:
+        seen_keys.update(_model_record_keys(record))
+        merged.append(record)
+
+    added = 0
+    skipped = 0
+    for item in scraped:
+        name = str(item.get("name") or "").strip()
+        profile_raw = str(item.get("profileUrl") or "").strip()
+        profile_url = (
+            profile_raw.rstrip("/") + "/" if profile_raw else ""
+        )
+        record = {
+            "id": (
+                model_id_for_profile(profile_url, name)
+                if profile_url
+                else model_slug_from_name(name)
+            ),
+            "name": name,
+            "slug": model_slug_from_name(name),
+            "poster": str(item.get("poster") or "").strip(),
+            "profileUrl": profile_url,
+            "sourceSite": str(item.get("sourceSite") or "").strip(),
+            "dateAdded": now,
+        }
+        keys = _model_record_keys(record)
+        if keys & seen_keys:
+            skipped += 1
+            for i, existing in enumerate(merged):
+                if _model_record_keys(existing) & keys:
+                    updated = dict(existing)
+                    if record.get("poster") and not str(
+                        updated.get("poster") or ""
+                    ).strip():
+                        updated["poster"] = record["poster"]
+                    if record.get("sourceSite") and not str(
+                        updated.get("sourceSite") or ""
+                    ).strip():
+                        updated["sourceSite"] = record["sourceSite"]
+                    merged[i] = updated
+                    break
+            continue
+        seen_keys.update(keys)
+        merged.append(record)
+        added += 1
+
+    merged.sort(key=lambda r: str(r.get("name") or "").lower())
+    return merged, added, skipped
+
+
+def _model_record_from_actor_search(actor: str, results: list[dict]) -> dict:
+    poster = ""
+    for item in results:
+        candidate = str(item.get("poster") or "").strip()
+        if candidate:
+            poster = candidate
+            break
+    sites = sorted(
+        {
+            str(r.get("site") or "").strip()
+            for r in results
+            if str(r.get("site") or "").strip()
+        }
+    )
+    slug = model_slug_from_name(actor)
+    return {
+        "name": actor,
+        "slug": slug,
+        "poster": poster,
+        "profileUrl": "",
+        "sourceSite": sites[0] if len(sites) == 1 else ",".join(sites),
+        "id": slug,
+    }
+
+
+def upsert_model_from_actor_search(
+    actor_name: str,
+    results: list[dict],
+    log: LogFn = print,
+) -> dict:
+    """After an actor search, add/update that performer on the site Models page."""
+    actor = (actor_name or "").strip()
+    valid = [r for r in results if r.get("url") and not r.get("error")]
+    if not actor or not valid:
+        return {"added": 0, "skipped": 0, "total": len(load_site_models())}
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    item = _model_record_from_actor_search(actor, valid)
+    merged, added, skipped = _merge_model_records(load_site_models(), [item], now)
+    save_site_models(merged)
+    if added:
+        log(f"  Added model “{actor}” to site Models page.")
+    elif skipped:
+        log(f"  Model “{actor}” already on site Models page (updated if needed).")
+
+    sync = sync_site_models_to_live_site(merged, log=log)
+    if sync.get("ok"):
+        log("  Models live on site (KV).")
+    elif sync.get("error"):
+        log(f"  KV sync skipped/failed: {sync.get('error')}")
+
+    return {
+        "added": added,
+        "skipped": skipped,
+        "total": len(merged),
+        "synced": bool(sync.get("ok")),
+        "sync": sync,
+    }
+
+
+def _parse_fpo_models_page(html: str, limit: int) -> list[dict]:
+    pairs = re.findall(
+        r'<a class="item" href="(https?://[^"]+/models/[^"]+)"[^>]*title="([^"]+)"',
+        html,
+        flags=re.I,
+    )
+    thumb_map: dict[str, str] = {}
+    for url, thumb in re.findall(
+        r'<a class="item" href="(https?://[^"]+/models/[^"]+)"[^>]*>.*?<img class="thumb" src="([^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(url.split("?")[0].rstrip("/"), thumb)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for profile_url, title in pairs:
+        profile_url = profile_url.split("?")[0].rstrip("/") + "/"
+        if profile_url in seen:
+            continue
+        seen.add(profile_url)
+        name = html_lib.unescape(title).strip()
+        if not name:
+            continue
+        out.append(
+            {
+                "name": name,
+                "poster": thumb_map.get(profile_url.rstrip("/"), ""),
+                "profileUrl": profile_url,
+                "sourceSite": "fpo.xxx",
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_generic_models_page(html: str, base_url: str, limit: int) -> list[dict]:
+    parsed = urllib.parse.urlsplit(base_url)
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    host = parsed.netloc.lower().replace("www.", "")
+
+    link_patterns = [
+        r'href="((?:https?://[^"]+)?/(?:models|model|pornstars|pornstar|actress)/[^"#?]+/?)"',
+        r'href="(https?://[^"]+/(?:models|model|pornstars|pornstar|actress)/[^"#?]+/?)"',
+    ]
+    pairs: list[tuple[str, str]] = []
+    for pattern in link_patterns:
+        for match in re.findall(pattern, html, flags=re.I):
+            path = match if match.startswith("http") else origin + match
+            pairs.append((path, ""))
+
+    thumb_map: dict[str, str] = {}
+    for path, thumb in re.findall(
+        r'href="([^"]+/(?:models|model|pornstars|pornstar|actress)/[^"]+)"[^>]*>.*?<img[^>]+src="([^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        key = path.split("?")[0].rstrip("/")
+        if not key.startswith("http"):
+            key = origin + key
+        thumb_map.setdefault(key, thumb)
+    for thumb, path in re.findall(
+        r'src="([^"]+)"[^>]*alt="([^"]{2,80})"',
+        html,
+        flags=re.I,
+    ):
+        for href in re.findall(
+            rf'href="([^"]+)"[^>]*>\s*<[^>]*alt="{re.escape(thumb)}"',
+            html,
+            flags=re.I | re.S,
+        ):
+            key = href if href.startswith("http") else origin + href
+            thumb_map.setdefault(key.rstrip("/"), thumb)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for profile_url, title in pairs:
+        if profile_url.startswith("/"):
+            profile_url = origin + profile_url
+        profile_url = profile_url.split("?")[0].split("#")[0]
+        if not profile_url.endswith("/"):
+            profile_url += "/"
+        lower = profile_url.lower()
+        if not re.search(
+            r"/(models|model|pornstars|pornstar|actress)/[^/]+/?$",
+            lower,
+        ):
+            continue
+        slug = profile_url.rstrip("/").split("/")[-1]
+        if slug.lower() in {"models", "model", "pornstars", "pornstar", "actress"}:
+            continue
+        if profile_url in seen:
+            continue
+        seen.add(profile_url)
+        name = html_lib.unescape(title).strip() if title else ""
+        if not name:
+            slug = profile_url.rstrip("/").split("/")[-1]
+            name = slug.replace("-", " ").replace("_", " ").strip()
+        if not name or name.lower() in {"models", "model", "video", "videos"}:
+            continue
+        out.append(
+            {
+                "name": name,
+                "poster": thumb_map.get(profile_url.rstrip("/"), ""),
+                "profileUrl": profile_url,
+                "sourceSite": host,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _fetch_json_models_api(api_url: str, log: LogFn = print) -> list[dict]:
+    req = urllib.request.Request(
+        api_url,
+        headers={"User-Agent": SEARCH_UA, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as res:
+            payload = json.loads(res.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            log(
+                "  Models API requires login (401). "
+                "Try a public HTML listing like fpo.xxx/models/ instead."
+            )
+        else:
+            log(f"  Models API error: HTTP {exc.code}")
+        return []
+    except Exception as exc:  # noqa: BLE001
+        log(f"  Models API error: {exc}")
+        return []
+
+    items: list = []
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        for key in ("models", "items", "data", "results"):
+            val = payload.get(key)
+            if isinstance(val, list):
+                items = val
+                break
+
+    out: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(
+            item.get("name")
+            or item.get("title")
+            or item.get("displayName")
+            or ""
+        ).strip()
+        profile_url = str(
+            item.get("profileUrl")
+            or item.get("url")
+            or item.get("link")
+            or ""
+        ).strip()
+        slug = str(item.get("slug") or "").strip()
+        if not profile_url and slug:
+            parsed = urllib.parse.urlsplit(api_url)
+            origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+            profile_url = f"{origin}/models/{slug}/"
+        if not name:
+            continue
+        poster = str(
+            item.get("poster")
+            or item.get("posterUrl")
+            or item.get("image")
+            or item.get("thumb")
+            or ""
+        ).strip()
+        host = urllib.parse.urlsplit(profile_url).netloc.lower().replace("www.", "")
+        out.append(
+            {
+                "name": name,
+                "poster": poster,
+                "profileUrl": profile_url,
+                "sourceSite": host,
+            }
+        )
+    return out
+
+
+def _models_listing_page_url(list_url: str, page: int) -> str:
+    parsed = urllib.parse.urlsplit(list_url.strip())
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    path = parsed.path.rstrip("/")
+    host = parsed.netloc.lower().replace("www.", "")
+
+    if page <= 1:
+        return list_url.strip()
+
+    if "fpo.xxx" in host:
+        return f"{origin}/models/{page}/"
+
+    if path.endswith("/models") or path.endswith("/model"):
+        return f"{origin}{path}/{page}/"
+
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    query = [(k, v) for k, v in query if k.lower() != "page"]
+    query.append(("page", str(page)))
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), "")
+    )
+
+
+def scrape_models_listing(
+    list_url: str,
+    max_pages: int = 10,
+    log: LogFn = print,
+    stop_event: threading.Event | None = None,
+) -> list[dict]:
+    """Scrape model names/posters from a site models index URL."""
+    list_url = (list_url or "").strip()
+    if not list_url:
+        raise ValueError("Models listing URL is required")
+    parsed = urllib.parse.urlsplit(list_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Enter a valid http(s) models listing URL")
+
+    host = parsed.netloc.lower().replace("www.", "")
+    max_pages = max(1, min(200, int(max_pages)))
+    found: list[dict] = []
+    seen_keys: set[str] = set()
+
+    def remember_item(item: dict) -> bool:
+        keys = _model_item_dedupe_keys(item)
+        if keys & seen_keys:
+            return False
+        seen_keys.update(keys)
+        found.append(item)
+        return True
+
+    if "girlcum.com" in host:
+        api_origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+        for page in range(1, max_pages + 1):
+            if stop_event is not None and stop_event.is_set():
+                break
+            api_url = f"{api_origin}/api/members/models?page={page}"
+            log(f"  [GirlCum] trying API page {page}…")
+            batch = _fetch_json_models_api(api_url, log=log)
+            if not batch:
+                if page == 1:
+                    log(
+                        "  GirlCum /models is JS-rendered and the API needs a member login. "
+                        "Use fpo.xxx/models/ or another public HTML listing."
+                    )
+                break
+            for item in batch:
+                remember_item(item)
+        if found:
+            return found
+
+    for page in range(1, max_pages + 1):
+        if stop_event is not None and stop_event.is_set():
+            log("Model import stopped by user.")
+            break
+        page_url = _models_listing_page_url(list_url, page)
+        log(f"  Fetching models page {page}: {page_url}")
+        try:
+            html = _fetch_search_html(page_url)
+        except Exception as exc:  # noqa: BLE001
+            log(f"  Page {page} failed: {exc}")
+            if page == 1:
+                raise
+            break
+
+        if "fpo.xxx" in host:
+            batch = _parse_fpo_models_page(html, limit=500)
+        else:
+            batch = _parse_generic_models_page(html, list_url, limit=500)
+
+        if not batch:
+            log(f"  Page {page}: no models found")
+            if page == 1 and "girlcum.com" in host:
+                log(
+                    "  GirlCum renders models in the browser after login — "
+                    "no models in static HTML. Try fpo.xxx/models/ instead."
+                )
+            break
+
+        added = 0
+        for item in batch:
+            if remember_item(item):
+                added += 1
+        log(f"  Page {page}: found {added} new model(s)")
+        if added == 0:
+            break
+
+    return found
+
+
+def import_models_from_url(
+    list_url: str,
+    max_pages: int = 10,
+    log: LogFn = print,
+    stop_event: threading.Event | None = None,
+) -> dict:
+    """Import models from a listing URL into models.json (+ optional KV sync)."""
+    scraped = scrape_models_listing(
+        list_url,
+        max_pages=max_pages,
+        log=log,
+        stop_event=stop_event,
+    )
+    if not scraped:
+        return {"added": 0, "skipped": 0, "total": len(load_site_models()), "scraped": 0}
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    merged, added, skipped = _merge_model_records(load_site_models(), scraped, now)
+    save_site_models(merged)
+    log(f"Saved {len(merged)} model(s) to {MODELS_PUBLIC.name}")
+
+    sync = sync_site_models_to_live_site(merged, log=log)
+    if sync.get("ok"):
+        log("  Models live on site (KV).")
+    elif sync.get("error"):
+        log(f"  KV sync skipped/failed: {sync.get('error')}")
+
+    return {
+        "added": added,
+        "skipped": skipped,
+        "scraped": len(scraped),
+        "total": len(merged),
+        "synced": bool(sync.get("ok")),
+        "sync": sync,
+    }
+
+
+import_bop_models_from_url = import_models_from_url
+
+
 _PARSERS = {
     "xvideos": _parse_xvideos,
     "xnxx": _parse_xnxx,
     "pornhub": _parse_pornhub,
     "fpo": _parse_fpo,
+    "eporner": _parse_eporner,
 }
 
 

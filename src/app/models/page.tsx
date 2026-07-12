@@ -10,7 +10,7 @@ export default function ModelsPage() {
   return (
     <ModelsCatalog
       title="Models"
-      subtitle="Actors and performers across every source in the catalog."
+      subtitle="Imported profiles and performers from videos across the catalog."
     />
   );
 }

@@ -69,6 +69,17 @@ const DEFAULT_COLLECTION = "98f0b8d8-336d-4ab9-9c2c-513c29815305";
 const PLACEHOLDER_POSTER =
   "https://images.unsplash.com/photo-1485846234645-a62644f84728?w=800&q=80";
 const OUTBOUND_KV_KEY = "outbound-films";
+const MODELS_KV_KEY = "site-models";
+
+type SiteModelRecord = {
+  id: string;
+  name: string;
+  slug: string;
+  poster: string;
+  profileUrl?: string;
+  sourceSite?: string;
+  dateAdded?: string;
+};
 
 function json(data: unknown, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -301,6 +312,61 @@ async function saveOutboundFilms(env: Env, records: OutboundRecord[]): Promise<b
   if (!env.OUTBOUND) return false;
   await env.OUTBOUND.put(OUTBOUND_KV_KEY, JSON.stringify(records));
   return true;
+}
+
+async function loadSiteModelsFromAssets(
+  request: Request,
+  env: Env
+): Promise<SiteModelRecord[]> {
+  try {
+    const assetUrl = new URL("/models.json", request.url);
+    const res = await env.ASSETS.fetch(new Request(assetUrl.toString()));
+    if (!res.ok) return [];
+    const data = (await res.json()) as unknown;
+    return Array.isArray(data) ? (data as SiteModelRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function loadLegacyBopModelsFromAssets(
+  request: Request,
+  env: Env
+): Promise<SiteModelRecord[]> {
+  try {
+    const assetUrl = new URL("/bop-models.json", request.url);
+    const res = await env.ASSETS.fetch(new Request(assetUrl.toString()));
+    if (!res.ok) return [];
+    const data = (await res.json()) as unknown;
+    return Array.isArray(data) ? (data as SiteModelRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function loadSiteModels(
+  request: Request,
+  env: Env
+): Promise<SiteModelRecord[]> {
+  if (env.OUTBOUND) {
+    try {
+      const raw = await env.OUTBOUND.get(MODELS_KV_KEY);
+      if (raw) {
+        const data = JSON.parse(raw) as unknown;
+        if (Array.isArray(data)) return data as SiteModelRecord[];
+      }
+      const legacy = await env.OUTBOUND.get("bop-models");
+      if (legacy) {
+        const data = JSON.parse(legacy) as unknown;
+        if (Array.isArray(data)) return data as SiteModelRecord[];
+      }
+    } catch {
+      // fall through to assets
+    }
+  }
+  const models = await loadSiteModelsFromAssets(request, env);
+  if (models.length > 0) return models;
+  return loadLegacyBopModelsFromAssets(request, env);
 }
 
 function outboundIdFromUrl(sourceUrl: string): string {
@@ -1061,6 +1127,18 @@ export default {
 
     if (url.pathname === "/api/films" || url.pathname.startsWith("/api/films/")) {
       return handlePublicFilmsApi(request, env, url.pathname);
+    }
+
+    if (url.pathname === "/api/models") {
+      if (request.method !== "GET") {
+        return json({ ok: false, error: "Method not allowed" }, 405);
+      }
+      const models = await loadSiteModels(request, env);
+      return jsonFresh({ ok: true, count: models.length, models });
+    }
+
+    if (url.pathname === "/api/bop-models") {
+      return jsonFresh({ ok: true, count: 0, models: [] });
     }
 
     if (url.pathname.startsWith("/api/admin")) {

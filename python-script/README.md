@@ -23,7 +23,7 @@ python3 python-script/ui.py
 
 Opens http://127.0.0.1:8765
 
-1. Enter an **actor name** and search XVideos / XNXX / Pornhub / MyFPO (fpo.xxx)  
+1. Enter an **actor name** and search XVideos / XNXX / Pornhub / MyFPO (fpo.xxx) / Eporner — the actor is auto-pushed to the site **Models** page when videos are found  
 2. Select videos from the results list  
 3. Choose one:
    - **Publish as links** — adds title + thumbnail to the site catalog; viewers hit an ad page then go to the source site (fast, no download)
@@ -31,7 +31,8 @@ Opens http://127.0.0.1:8765
 4. Or use **Sync new** / **Import all** from FPO / Playvids:
    - **Sync new** — pulls only the newest pages and stops when everything is already on your site (use this daily)
    - **Import all** — deep crawl for a one-time backfill (set max pages high)
-5. For **live updates without rebuild**, bind Cloudflare KV as `OUTBOUND` (see below) and set `SITE_URL` in `.dev.vars`
+5. **Import models** — paste a `/models` listing URL (e.g. `https://www.fpo.xxx/models/`) to import performer profiles into `models.json` for the site **Models** page. Re-imports skip duplicates by profile URL, slug, and name.
+6. For **live updates without rebuild**, bind Cloudflare KV as `OUTBOUND` (see below) and set `SITE_URL` in `.dev.vars`
 
 ### Hands-off auto sync (recommended)
 

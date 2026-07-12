@@ -3,8 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/PageHeader";
 import { ModelCard } from "@/components/ModelCard";
-import { deriveModels } from "@/data/models";
+import { deriveModels, type ModelSummary } from "@/data/models";
 import { fetchFilms } from "@/lib/filmsApi";
+import {
+  fetchSiteModels,
+  mergeImportedAndFilmModels,
+} from "@/lib/siteModelsApi";
 
 interface ModelsCatalogProps {
   site?: "fpo";
@@ -17,16 +21,20 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [models, setModels] = useState(
-    [] as ReturnType<typeof deriveModels>
+    [] as Array<ModelSummary & { profileUrl?: string }>
   );
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const films = await fetchFilms();
+        const [imported, films] = await Promise.all([
+          fetchSiteModels(),
+          fetchFilms(),
+        ]);
         if (!cancelled) {
-          setModels(deriveModels(films, site ? { site } : undefined));
+          const fromFilms = deriveModels(films, site ? { site } : undefined);
+          setModels(mergeImportedAndFilmModels(imported, fromFilms));
           setError("");
         }
       } catch (err) {
@@ -94,12 +102,17 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
             {displayedModels.length > 0 ? (
               <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
                 {displayedModels.map((model) => (
-                  <ModelCard key={model.slug} model={model} site={site} />
+                  <ModelCard
+                    key={model.slug}
+                    model={model}
+                    site={site}
+                    external={Boolean(model.profileUrl)}
+                  />
                 ))}
               </div>
             ) : (
               <p className="mt-10 text-center text-sm text-cinema-muted">
-                No models found.
+                No models found. Import from the Python UI or publish videos with actor names.
               </p>
             )}
           </>
