@@ -14,7 +14,25 @@ export function Footer() {
             </p>
           </div>
 
-          <nav className="flex gap-6">
+          <nav className="flex flex-wrap justify-center gap-6">
+            <Link
+              href="/videos"
+              className="text-sm text-cinema-muted transition-colors hover:text-cinema-accent"
+            >
+              Videos
+            </Link>
+            <Link
+              href="/models"
+              className="text-sm text-cinema-muted transition-colors hover:text-cinema-accent"
+            >
+              Models
+            </Link>
+            <Link
+              href="/bop-models"
+              className="text-sm text-cinema-muted transition-colors hover:text-cinema-accent"
+            >
+              BOP Models
+            </Link>
             <Link
               href="/films"
               className="text-sm text-cinema-muted transition-colors hover:text-cinema-accent"

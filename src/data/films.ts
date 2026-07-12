@@ -24,6 +24,10 @@ export interface Film {
   kind?: FilmKind;
   /** Original watch URL for outbound films */
   sourceUrl?: string;
+  /** Primary actor / model name */
+  actor?: string;
+  /** Source site (e.g. fpo, xvideos) */
+  site?: string;
 }
 
 export function isOutboundFilm(film: Film): boolean {
@@ -76,7 +80,15 @@ export function filterAndSortFilms(
   if (query.trim()) {
     const normalized = query.trim().toLowerCase();
     result = result.filter((film) =>
-      [film.title, film.description, film.synopsis, film.genre, film.year.toString()]
+      [
+        film.title,
+        film.description,
+        film.synopsis,
+        film.genre,
+        film.actor,
+        film.site,
+        film.year.toString(),
+      ]
         .join(" ")
         .toLowerCase()
         .includes(normalized)

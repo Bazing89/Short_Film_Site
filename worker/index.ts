@@ -50,6 +50,8 @@ type Film = {
   dateUploaded?: string;
   kind?: "bunny" | "outbound";
   sourceUrl?: string;
+  actor?: string;
+  site?: string;
 };
 
 type OutboundRecord = {
@@ -197,8 +199,18 @@ function bunnyThumbnailSource(env: Env, video: BunnyVideo): string {
   return "";
 }
 
+function parseActorFromTitle(title: string): string | undefined {
+  const sep = title.indexOf(" — ");
+  if (sep > 0) {
+    const actor = title.slice(0, sep).trim();
+    return actor || undefined;
+  }
+  return undefined;
+}
+
 function toFilm(env: Env, video: BunnyVideo): Film {
   const title = cleanVideoTitle(video.title || video.guid);
+  const actor = parseActorFromTitle(title);
   const year = video.dateUploaded
     ? new Date(video.dateUploaded).getFullYear()
     : new Date().getFullYear();
@@ -217,6 +229,7 @@ function toFilm(env: Env, video: BunnyVideo): Film {
     credits: [],
     dateUploaded: video.dateUploaded,
     kind: "bunny",
+    actor,
   };
 }
 
@@ -252,6 +265,8 @@ function toOutboundFilm(record: OutboundRecord): Film {
     dateUploaded: record.dateAdded,
     kind: "outbound",
     sourceUrl: record.sourceUrl,
+    actor: record.actor,
+    site: record.site,
   };
 }
 
@@ -1001,6 +1016,21 @@ function renderSitemapXml(films: Film[], origin: string): string {
     <loc>${escapeHtml(origin)}/films</loc>
     <changefreq>daily</changefreq>
     <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>${escapeHtml(origin)}/videos</loc>
+    <changefreq>daily</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>${escapeHtml(origin)}/models</loc>
+    <changefreq>daily</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>${escapeHtml(origin)}/bop-models</loc>
+    <changefreq>daily</changefreq>
+    <priority>0.8</priority>
   </url>
 ${urls}
 </urlset>`;
