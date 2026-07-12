@@ -90,6 +90,10 @@ SEARCH_SOURCES = {
         "label": "Eporner",
         "url": lambda q: f"https://www.eporner.com/search/{urllib.parse.quote_plus(q)}/",
     },
+    "playvids": {
+        "label": "Playvids",
+        "url": lambda q: f"https://www.playvids.com/search?q={urllib.parse.quote_plus(q)}",
+    },
 }
 
 # Full-catalog import (newest listings), not actor search
@@ -417,6 +421,90 @@ def _parse_eporner(html: str, limit: int) -> list[dict]:
                 "title": cleaned or _slug_title(path),
                 "url": url,
                 "site": "eporner",
+                "poster": thumb_map.get(path, ""),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+_PLAYVIDS_SKIP_PREFIXES = (
+    "/account/",
+    "/categories/",
+    "/channels/",
+    "/pornstars/",
+    "/pornstar/",
+    "/tags/",
+    "/search",
+    "/videos",
+)
+
+
+def _playvids_path_ok(path: str) -> bool:
+    path = path.split("?")[0]
+    if any(path.startswith(prefix) for prefix in _PLAYVIDS_SKIP_PREFIXES):
+        return False
+    parts = path.strip("/").split("/")
+    return len(parts) >= 2 and len(parts[0]) >= 6
+
+
+def _parse_playvids(html: str, limit: int) -> list[dict]:
+    pairs = re.findall(
+        r'<h5 class="card-title">\s*<a href="(/[A-Za-z0-9]{8,14}/[^"]+)">([^<]+)</a>',
+        html,
+        flags=re.I,
+    )
+    if not pairs:
+        pairs = re.findall(
+            r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"[^>]*>.*?alt="([^"]+)"',
+            html,
+            flags=re.I | re.S,
+        )
+    if not pairs:
+        pairs = [
+            (path, _slug_title(path))
+            for path in re.findall(
+                r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"',
+                html,
+                flags=re.I,
+            )
+        ]
+
+    thumb_map: dict[str, str] = {}
+    for path, thumb in re.findall(
+        r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"[^>]*>\s*<img[^>]+src="(https?://[^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(path.split("?")[0], thumb)
+    for path, thumb in re.findall(
+        r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"[^>]*>.*?src="(https?://[^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(path.split("?")[0], thumb)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for path, title in pairs:
+        path = path.split("?")[0]
+        if not _playvids_path_ok(path):
+            continue
+        full = "https://www.playvids.com" + path
+        if full in seen:
+            continue
+        seen.add(full)
+        parts = path.strip("/").split("/")
+        cleaned = html_lib.unescape(title).strip()
+        if cleaned.lower() in {"playvids", "video"}:
+            continue
+        out.append(
+            {
+                "id": parts[0],
+                "title": cleaned or _slug_title(path),
+                "url": full,
+                "site": "playvids",
                 "poster": thumb_map.get(path, ""),
             }
         )
@@ -815,45 +903,7 @@ def scrape_playvids_page(page: int) -> list[dict]:
         html = _fetch_search_html(url)
     except Exception:  # noqa: BLE001
         return []
-    pairs = re.findall(
-        r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"[^>]*>.*?alt="([^"]+)"',
-        html,
-        flags=re.I | re.S,
-    )
-    out: list[dict] = []
-    seen: set[str] = set()
-    skip_prefixes = (
-        "/account/",
-        "/categories/",
-        "/channels/",
-        "/pornstars/",
-        "/tags/",
-        "/search",
-    )
-    for path, title in pairs:
-        path = path.split("?")[0]
-        if any(path.startswith(p) for p in skip_prefixes):
-            continue
-        parts = path.strip("/").split("/")
-        if len(parts) < 2 or len(parts[0]) < 6:
-            continue
-        full = "https://www.playvids.com" + path
-        if full in seen:
-            continue
-        seen.add(full)
-        cleaned = html_lib.unescape(title).strip() or _slug_title(path)
-        if cleaned.lower() in {"playvids", "video"}:
-            continue
-        out.append(
-            {
-                "id": parts[0],
-                "title": cleaned,
-                "url": full,
-                "site": "playvids",
-                "poster": "",
-            }
-        )
-    return out
+    return _parse_playvids(html, limit=100)
 
 
 def import_catalog_to_site(
@@ -1518,6 +1568,7 @@ _PARSERS = {
     "pornhub": _parse_pornhub,
     "fpo": _parse_fpo,
     "eporner": _parse_eporner,
+    "playvids": _parse_playvids,
 }
 
 
