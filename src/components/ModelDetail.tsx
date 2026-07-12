@@ -6,6 +6,7 @@ import { BackLink } from "@/components/PageHeader";
 import { VideoCard } from "@/components/VideoCard";
 import { getFilmsForModel } from "@/data/models";
 import { fetchFilms } from "@/lib/filmsApi";
+import { fetchSiteModels, siteRecordToSummary } from "@/lib/siteModelsApi";
 
 function ModelDetailContent() {
   const searchParams = useSearchParams();
@@ -31,8 +32,30 @@ function ModelDetailContent() {
     let cancelled = false;
     void (async () => {
       try {
-        const all = await fetchFilms();
+        const [importedModels, all] = await Promise.all([
+          fetchSiteModels(),
+          fetchFilms(),
+        ]);
         if (cancelled) return;
+
+        const imported = importedModels.find(
+          (model) => model.slug.toLowerCase() === slug.toLowerCase()
+        );
+
+        if (imported) {
+          const result = getFilmsForModel(all, slug, {
+            site,
+            modelName: imported.name,
+          });
+          const summary = siteRecordToSummary(imported);
+          setName(summary.name);
+          setPoster(summary.poster || result.model?.poster || "");
+          setVideoCount(result.films.length);
+          setFilms(result.films);
+          setError("");
+          return;
+        }
+
         const result = getFilmsForModel(all, slug, site ? { site } : undefined);
         if (!result.model) {
           setError("Model not found");
@@ -87,20 +110,25 @@ function ModelDetailContent() {
           <BackLink href={backHref} label="Back to models" />
           <div className="mt-6 flex flex-col gap-6 sm:flex-row sm:items-end">
             <div className="relative h-40 w-32 shrink-0 overflow-hidden rounded-lg border border-cinema-border/50 sm:h-48 sm:w-36">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={poster}
-                alt={name}
-                className="absolute inset-0 h-full w-full object-cover"
-              />
+              {poster ? (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img
+                  src={poster}
+                  alt={name}
+                  className="absolute inset-0 h-full w-full object-cover"
+                />
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center bg-cinema-dark text-xs text-cinema-muted">
+                  No image
+                </div>
+              )}
             </div>
             <div>
               <h1 className="font-display text-3xl capitalize text-cinema-text sm:text-4xl">
                 {name}
               </h1>
               <p className="mt-2 text-sm text-cinema-muted">
-                {videoCount} video{videoCount !== 1 ? "s" : ""}
-                {site === "fpo" ? " on MyFPO" : ""}
+                {videoCount} video{videoCount !== 1 ? "s" : ""} on BangHeroes
               </p>
             </div>
           </div>
@@ -108,11 +136,17 @@ function ModelDetailContent() {
       </div>
 
       <section className="mx-auto max-w-7xl px-4 py-10 sm:px-6 sm:py-12 lg:px-8">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-          {films.map((film) => (
-            <VideoCard key={film.slug} film={film} />
-          ))}
-        </div>
+        {films.length > 0 ? (
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+            {films.map((film) => (
+              <VideoCard key={film.slug} film={film} />
+            ))}
+          </div>
+        ) : (
+          <p className="text-center text-sm text-cinema-muted">
+            No videos for this model yet. Search and publish links from the Python UI.
+          </p>
+        )}
       </section>
     </>
   );

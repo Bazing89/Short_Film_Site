@@ -504,6 +504,48 @@ def fetch_poster_from_page(page_url: str) -> str:
     return ""
 
 
+def enrich_search_results_with_posters(
+    results: list[dict],
+    log: LogFn = print,
+    max_fetches: int = 8,
+) -> list[dict]:
+    """Fill missing thumbnails on search hits (for UI + model auto-push)."""
+    enriched: list[dict] = []
+    fetches = 0
+    for item in results:
+        if item.get("error") or not item.get("url"):
+            enriched.append(item)
+            continue
+        copy = dict(item)
+        poster = str(copy.get("poster") or "").strip()
+        if not poster and fetches < max_fetches:
+            poster = fetch_poster_from_page(str(copy.get("url") or ""))
+            fetches += 1
+            if poster:
+                copy["poster"] = poster
+        enriched.append(copy)
+    return enriched
+
+
+def _best_poster_for_search_results(
+    results: list[dict],
+    log: LogFn = print,
+) -> str:
+    for item in results:
+        poster = str(item.get("poster") or "").strip()
+        if poster:
+            return poster
+    for item in results[:8]:
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        poster = fetch_poster_from_page(url)
+        if poster:
+            log(f"  Pulled model thumbnail from video page.")
+            return poster
+    return ""
+
+
 def _admin_request_json(
     site: str,
     path: str,
@@ -1054,9 +1096,7 @@ def _merge_model_records(
             for i, existing in enumerate(merged):
                 if _model_record_keys(existing) & keys:
                     updated = dict(existing)
-                    if record.get("poster") and not str(
-                        updated.get("poster") or ""
-                    ).strip():
+                    if record.get("poster"):
                         updated["poster"] = record["poster"]
                     if record.get("sourceSite") and not str(
                         updated.get("sourceSite") or ""
@@ -1073,13 +1113,10 @@ def _merge_model_records(
     return merged, added, skipped
 
 
-def _model_record_from_actor_search(actor: str, results: list[dict]) -> dict:
-    poster = ""
-    for item in results:
-        candidate = str(item.get("poster") or "").strip()
-        if candidate:
-            poster = candidate
-            break
+def _model_record_from_actor_search(
+    actor: str, results: list[dict], log: LogFn = print
+) -> dict:
+    poster = _best_poster_for_search_results(results, log=log)
     sites = sorted(
         {
             str(r.get("site") or "").strip()
@@ -1110,13 +1147,19 @@ def upsert_model_from_actor_search(
         return {"added": 0, "skipped": 0, "total": len(load_site_models())}
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    item = _model_record_from_actor_search(actor, valid)
+    item = _model_record_from_actor_search(actor, valid, log=log)
     merged, added, skipped = _merge_model_records(load_site_models(), [item], now)
     save_site_models(merged)
     if added:
-        log(f"  Added model “{actor}” to site Models page.")
+        if item.get("poster"):
+            log(f"  Added model “{actor}” with thumbnail to site Models page.")
+        else:
+            log(f"  Added model “{actor}” to site Models page (no thumbnail found).")
     elif skipped:
-        log(f"  Model “{actor}” already on site Models page (updated if needed).")
+        if item.get("poster"):
+            log(f"  Updated model “{actor}” thumbnail on site Models page.")
+        else:
+            log(f"  Model “{actor}” already on site Models page.")
 
     sync = sync_site_models_to_live_site(merged, log=log)
     if sync.get("ok"):

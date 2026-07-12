@@ -192,6 +192,7 @@ def _run_search(actor: str, sources: list[str], limit: int) -> None:
         results = bunny.search_actor_videos(
             actor, sources=sources or None, limit_per_source=limit
         )
+        results = bunny.enrich_search_results_with_posters(results, log=_append_log)
         valid = [r for r in results if r.get("url") and not r.get("error")]
         if valid:
             bunny.upsert_model_from_actor_search(actor, valid, log=_append_log)

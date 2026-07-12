@@ -20,6 +20,34 @@ export function modelDetailPath(name: string, site?: "fpo"): string {
   return `/model?slug=${encodeURIComponent(slug)}`;
 }
 
+function normalizeModelName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+export function filmMatchesModel(
+  film: Film,
+  modelName: string,
+  slug: string
+): boolean {
+  const normalizedSlug = slug.toLowerCase();
+  const normalizedName = normalizeModelName(modelName);
+  const actor = filmActor(film);
+
+  if (actor) {
+    if (modelSlug(actor).toLowerCase() === normalizedSlug) return true;
+    if (normalizeModelName(actor) === normalizedName) return true;
+  }
+
+  if (normalizedName) {
+    const haystack = normalizeModelName(
+      [film.title, film.description, film.synopsis].join(" ")
+    );
+    if (haystack.includes(normalizedName)) return true;
+  }
+
+  return false;
+}
+
 function filmActor(film: Film): string {
   return (film.actor || "").trim();
 }
@@ -83,22 +111,24 @@ export function deriveModels(
 export function getFilmsForModel(
   films: Film[],
   slug: string,
-  options?: { site?: string }
+  options?: { site?: string; modelName?: string }
 ): { model: ModelSummary | null; films: Film[] } {
-  const { site } = options ?? {};
+  const { site, modelName } = options ?? {};
   const normalized = slug.toLowerCase();
   const matched = films.filter((film) => {
-    const actor = filmActor(film);
-    if (!actor || modelSlug(actor).toLowerCase() !== normalized) return false;
     if (site && film.site !== site && film.genre !== site) return false;
-    return true;
+    if (modelName) {
+      return filmMatchesModel(film, modelName, slug);
+    }
+    const actor = filmActor(film);
+    return Boolean(actor && modelSlug(actor).toLowerCase() === normalized);
   });
 
   if (matched.length === 0) {
     return { model: null, films: [] };
   }
 
-  const name = filmActor(matched[0]) || slug;
+  const name = modelName || filmActor(matched[0]) || slug;
   const sorted = [...matched].sort((a, b) => filmDate(b) - filmDate(a));
 
   return {

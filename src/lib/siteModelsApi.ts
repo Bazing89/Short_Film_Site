@@ -1,4 +1,5 @@
-import type { ModelSummary } from "@/data/models";
+import { filmMatchesModel, type ModelSummary } from "@/data/models";
+import type { Film } from "@/data/films";
 
 export interface SiteModelRecord {
   id: string;
@@ -10,16 +11,13 @@ export interface SiteModelRecord {
   dateAdded?: string;
 }
 
-export function siteRecordToSummary(
-  record: SiteModelRecord
-): ModelSummary & { profileUrl?: string } {
+export function siteRecordToSummary(record: SiteModelRecord): ModelSummary {
   return {
     name: record.name,
     slug: record.slug,
     videoCount: 0,
     poster: record.poster,
     latestDate: record.dateAdded,
-    profileUrl: record.profileUrl,
   };
 }
 
@@ -51,13 +49,18 @@ function normalizeName(name: string): string {
 
 export function mergeImportedAndFilmModels(
   imported: SiteModelRecord[],
-  fromFilms: ModelSummary[]
-): Array<ModelSummary & { profileUrl?: string }> {
-  const bySlug = new Map<string, ModelSummary & { profileUrl?: string }>();
+  fromFilms: ModelSummary[],
+  films: Film[] = []
+): ModelSummary[] {
+  const bySlug = new Map<string, ModelSummary>();
   const nameIndex = new Map<string, string>();
 
   for (const record of imported) {
     const summary = siteRecordToSummary(record);
+    const matchedCount = films.filter((film) =>
+      filmMatchesModel(film, summary.name, summary.slug)
+    ).length;
+    summary.videoCount = matchedCount;
     const slugKey = summary.slug.toLowerCase();
     bySlug.set(slugKey, summary);
     nameIndex.set(normalizeName(summary.name), slugKey);

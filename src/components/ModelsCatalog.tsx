@@ -20,9 +20,7 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [models, setModels] = useState(
-    [] as Array<ModelSummary & { profileUrl?: string }>
-  );
+  const [models, setModels] = useState([] as ModelSummary[]);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,7 +32,7 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
         ]);
         if (!cancelled) {
           const fromFilms = deriveModels(films, site ? { site } : undefined);
-          setModels(mergeImportedAndFilmModels(imported, fromFilms));
+          setModels(mergeImportedAndFilmModels(imported, fromFilms, films));
           setError("");
         }
       } catch (err) {
@@ -102,12 +100,7 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
             {displayedModels.length > 0 ? (
               <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
                 {displayedModels.map((model) => (
-                  <ModelCard
-                    key={model.slug}
-                    model={model}
-                    site={site}
-                    external={Boolean(model.profileUrl)}
-                  />
+                  <ModelCard key={model.slug} model={model} site={site} />
                 ))}
               </div>
             ) : (
