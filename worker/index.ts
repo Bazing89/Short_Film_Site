@@ -21,6 +21,7 @@ import {
   importModelsFromHtml,
   importModelsFromUrl,
   loadSiteModelsFromKv,
+  saveSiteModels,
   setModelsImportStop,
   upsertModelFromActorSearch,
   type SiteModelRecord as ImportSiteModel,
@@ -1015,6 +1016,25 @@ async function handleAdminApi(
     if (body.action === "stop") {
       await setModelsImportStop(env, true);
       return jsonFresh({ ok: true, message: "Model import stop requested" });
+    }
+
+    if (body.action === "clear") {
+      const synced = await saveSiteModels(env, []);
+      // Also drop legacy key if present
+      try {
+        await env.OUTBOUND.delete("bop-models");
+      } catch {
+        /* ignore */
+      }
+      return jsonFresh({
+        ok: true,
+        added: 0,
+        skipped: 0,
+        scraped: 0,
+        total: 0,
+        synced,
+        log: ["Cleared all models from KV"],
+      });
     }
 
     const existingKv = await loadSiteModelsFromKv(env);

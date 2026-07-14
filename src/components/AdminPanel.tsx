@@ -345,6 +345,36 @@ export function AdminPanel() {
     appendLog("Stop requested for model import");
   }
 
+  async function clearAllModels() {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("Remove ALL models from the site?")
+    ) {
+      return;
+    }
+    appendLog("Clearing all models…");
+    const { ok, data } = await api<{
+      total?: number;
+      error?: string;
+      log?: string[];
+      synced?: boolean;
+    }>("/api/admin/models", {
+      method: "POST",
+      body: JSON.stringify({ action: "clear" }),
+    });
+    if (data.log?.length) appendLog(data.log);
+    if (!ok) {
+      appendLog(data.error || "Clear models failed");
+      return;
+    }
+    setModelsCount(0);
+    appendLog(
+      data.synced === false
+        ? "Models cleared locally but KV may be missing"
+        : "All models removed"
+    );
+  }
+
   async function runSearch() {
     const name = actor.trim();
     if (!name) {
@@ -660,6 +690,14 @@ export function AdminPanel() {
             className="rounded-full border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-400 disabled:opacity-50"
           >
             Stop
+          </button>
+          <button
+            type="button"
+            disabled={modelsRunning || modelsCount === 0}
+            onClick={() => void clearAllModels()}
+            className="rounded-full border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-400 disabled:opacity-50"
+          >
+            Clear all models
           </button>
         </div>
         <details className="border-t border-cinema-border/40 pt-3">
