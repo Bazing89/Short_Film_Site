@@ -14,7 +14,9 @@ Collection ID defaults to `98f0b8d8-336d-4ab9-9c2c-513c29815305` (override with 
 
 ## Queue links
 
-### Browser UI (actor search + paste)
+**Web `/admin` (links + models only):** After deploy, open `/admin` (password `7777`). Same workflows as this tool for Sync new / Import all, actor search → Publish as links, paste URLs, and Import models (including paste HTML). Cloudflare Cron auto-scrapes FPO/Playvids every 6 hours. Bunny downloads are **not** on the web — use this local UI for yt-dlp → Bunny.
+
+**Local UI (full tool including Bunny downloads):**
 
 ```bash
 cd "/path/to/Short_Film_Site"
@@ -26,8 +28,6 @@ python-script/.venv/bin/python python-script/ui.py
 Opens http://127.0.0.1:8765
 
 (You can still run `python3 python-script/ui.py` without the venv; Indexxx auto-fetch may fail behind Cloudflare — use **Paste page HTML** in that case.)
-
-**Cloud auto-scrape (computer off):** Deploy the site, then use `/admin` (password `7777`) → **Sync new now** / **Auto-scrape On**. Cloudflare Cron pulls FPO/Playvids every 6 hours into outbound KV (links only — not yt-dlp downloads).
 
 1. Enter an **actor name** and search XVideos / XNXX / Pornhub / MyFPO (fpo.xxx) / Eporner / Playvids — the actor is auto-pushed to the site **Models** page when videos are found  
 2. Select videos from the results list  

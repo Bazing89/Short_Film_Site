@@ -11,10 +11,21 @@
 import { BUILD_SECRETS } from "./generated-secrets";
 import {
   loadSyncStatus,
+  requestCatalogSyncStop,
   runCatalogSync,
   saveSyncStatus,
   type SyncResult,
 } from "./catalog-sync";
+import {
+  INDEXXX_GIRLCUM_MODELS,
+  importModelsFromHtml,
+  importModelsFromUrl,
+  loadSiteModelsFromKv,
+  setModelsImportStop,
+  upsertModelFromActorSearch,
+  type SiteModelRecord as ImportSiteModel,
+} from "./models-import";
+import { searchActorVideos } from "./search";
 
 export interface Env {
   ASSETS: Fetcher;
@@ -892,6 +903,11 @@ async function handleAdminApi(
       return jsonFresh({ ok: true, enabled: status.enabled, ...status });
     }
 
+    if (body.action === "stop") {
+      await requestCatalogSyncStop(env);
+      return jsonFresh({ ok: true, message: "Stop requested" });
+    }
+
     const existing = await loadOutboundFilms(request, env);
     const { result, films } = await runCatalogSync(env, {
       sites: body.sites,
@@ -913,6 +929,128 @@ async function handleAdminApi(
       catalogCount: films.length,
       persisted: true,
     });
+  }
+
+  if (pathname === "/api/admin/search" && request.method === "POST") {
+    const body = (await request.json().catch(() => ({}))) as {
+      actor?: string;
+      sources?: string[];
+      limit?: number;
+    };
+    const actor = String(body.actor || "").trim();
+    if (!actor) {
+      return json({ ok: false, error: "Actor name is required" }, 400);
+    }
+    try {
+      const { results, log } = await searchActorVideos(
+        actor,
+        body.sources,
+        body.limit ?? 24
+      );
+      const valid = results.filter((r) => r.url && !r.error);
+      let modelLog: string[] = [];
+      let modelsCount = 0;
+      if (valid.length && env.OUTBOUND) {
+        let existingModels = await loadSiteModelsFromKv(env);
+        if (existingModels.length === 0) {
+          existingModels = (await loadSiteModels(
+            request,
+            env
+          )) as ImportSiteModel[];
+        }
+        const upsert = await upsertModelFromActorSearch(
+          env,
+          actor,
+          results,
+          existingModels
+        );
+        modelLog = upsert.log;
+        modelsCount = upsert.total;
+      } else {
+        modelsCount = (await loadSiteModels(request, env)).length;
+      }
+      return jsonFresh({
+        ok: true,
+        actor,
+        count: valid.length,
+        results,
+        log: [...log, ...modelLog],
+        modelsCount,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return json({ ok: false, error: message }, 500);
+    }
+  }
+
+  if (pathname === "/api/admin/models" && request.method === "GET") {
+    const models = await loadSiteModels(request, env);
+    return jsonFresh({
+      ok: true,
+      count: models.length,
+      models: models.slice(0, 50),
+      kv: Boolean(env.OUTBOUND),
+    });
+  }
+
+  if (pathname === "/api/admin/models" && request.method === "POST") {
+    if (!env.OUTBOUND) {
+      return json(
+        {
+          ok: false,
+          error:
+            "KV binding OUTBOUND is missing. Add it in Cloudflare Dashboard → Worker → Settings → Bindings.",
+        },
+        503
+      );
+    }
+
+    const body = (await request.json().catch(() => ({}))) as {
+      action?: string;
+      url?: string;
+      html?: string;
+      maxPages?: number;
+    };
+
+    if (body.action === "stop") {
+      await setModelsImportStop(env, true);
+      return jsonFresh({ ok: true, message: "Model import stop requested" });
+    }
+
+    const existingKv = await loadSiteModelsFromKv(env);
+    const existing =
+      existingKv.length > 0
+        ? existingKv
+        : ((await loadSiteModels(request, env)) as ImportSiteModel[]);
+
+    try {
+      if (body.action === "import-html" || body.html) {
+        const result = await importModelsFromHtml(
+          env,
+          String(body.html || ""),
+          String(body.url || INDEXXX_GIRLCUM_MODELS),
+          existing
+        );
+        return jsonFresh({ ok: true, ...result });
+      }
+
+      const url = String(body.url || INDEXXX_GIRLCUM_MODELS).trim();
+      const result = await importModelsFromUrl(
+        env,
+        url,
+        body.maxPages ?? 10,
+        existing
+      );
+      return jsonFresh({ ok: true, ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return json({ ok: false, error: message, log: [message] }, 500);
+    }
+  }
+
+  if (pathname === "/api/admin/models/stop" && request.method === "POST") {
+    await setModelsImportStop(env, true);
+    return jsonFresh({ ok: true, message: "Model import stop requested" });
   }
 
   return json({ ok: false, error: "Not found" }, 404);

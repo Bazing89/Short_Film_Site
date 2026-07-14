@@ -41,6 +41,7 @@ export type SyncStatus = {
 
 export const SYNC_STATUS_KV_KEY = "catalog-sync-status";
 export const SYNC_ENABLED_KV_KEY = "catalog-sync-enabled";
+export const SYNC_STOP_KV_KEY = "catalog-sync-stop";
 
 const PLAYVIDS_SKIP_PREFIXES = [
   "/account/",
@@ -357,6 +358,10 @@ export async function runCatalogSync(
   const maxPages = Math.max(1, Math.min(20, options.maxPages ?? 5));
   const untilCaughtUp = options.untilCaughtUp !== false;
 
+  if (env.OUTBOUND) {
+    await env.OUTBOUND.delete(SYNC_STOP_KV_KEY);
+  }
+
   if (!env.OUTBOUND) {
     const result: SyncResult = {
       ok: false,
@@ -389,13 +394,24 @@ export async function runCatalogSync(
     return { result, films: options.existing };
   }
 
+  const shouldStop = async () => {
+    const v = await env.OUTBOUND!.get(SYNC_STOP_KV_KEY);
+    return v === "1" || v === "true";
+  };
+
   let films = options.existing;
   let totalAdded = 0;
   let totalSkipped = 0;
   let pagesDone = 0;
+  let stopped = false;
 
   try {
     for (const site of chosen) {
+      if (await shouldStop()) {
+        log.push("Import stopped by user.");
+        stopped = true;
+        break;
+      }
       const label = SITE_LABELS[site] || site;
       const mode = untilCaughtUp
         ? "until caught up"
@@ -404,6 +420,11 @@ export async function runCatalogSync(
 
       let emptyStreak = 0;
       for (let page = 1; page <= maxPages; page++) {
+        if (await shouldStop()) {
+          log.push("Import stopped by user.");
+          stopped = true;
+          break;
+        }
         log.push(`  [${label}] page ${page}/${maxPages}…`);
         let items: ScrapedItem[];
         try {
@@ -446,6 +467,7 @@ export async function runCatalogSync(
           break;
         }
       }
+      if (stopped) break;
     }
 
     log.push(
@@ -481,6 +503,11 @@ export async function runCatalogSync(
     };
     return { result, films };
   }
+}
+
+export async function requestCatalogSyncStop(env: CatalogSyncEnv): Promise<void> {
+  if (!env.OUTBOUND) return;
+  await env.OUTBOUND.put(SYNC_STOP_KV_KEY, "1");
 }
 
 export async function loadSyncStatus(env: CatalogSyncEnv): Promise<SyncStatus> {

@@ -1,28 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-type JobStatus = "queued" | "fetching" | "processing" | "finished" | "failed";
-
-type LocalJob = {
-  id: string;
+type SearchResult = {
+  id?: string;
+  title: string;
   url: string;
-  title: string;
-  bunnyVideoId?: string;
-  status: JobStatus;
-  progress: number;
-  message?: string;
-  createdAt: string;
-};
-
-type LibraryItem = {
-  bunnyVideoId: string;
-  title: string;
-  status: JobStatus;
-  progress: number;
-  length?: number;
-  dateUploaded?: string;
-  embedUrl: string;
+  site: string;
+  poster?: string;
+  actor?: string;
+  error?: boolean;
 };
 
 type OutboundFilm = {
@@ -50,6 +37,23 @@ type SyncLastRun = {
 
 const SESSION_KEY = "admin_token";
 
+const SEARCH_SOURCES = [
+  { key: "xvideos", label: "XVideos" },
+  { key: "xnxx", label: "XNXX" },
+  { key: "pornhub", label: "Pornhub" },
+  { key: "fpo", label: "MyFPO" },
+  { key: "eporner", label: "Eporner" },
+  { key: "playvids", label: "Playvids" },
+] as const;
+
+const CATALOG_SOURCES = [
+  { key: "fpo", label: "MyFPO" },
+  { key: "playvids", label: "Playvids" },
+] as const;
+
+const DEFAULT_MODELS_URL =
+  "https://www.indexxx.com/websites/10182/girlcum.com/models";
+
 async function api<T>(
   path: string,
   options: RequestInit = {}
@@ -65,69 +69,54 @@ async function api<T>(
   return { ok: res.ok, status: res.status, data };
 }
 
-function statusLabel(status: JobStatus): string {
-  switch (status) {
-    case "finished":
-      return "Finished";
-    case "failed":
-      return "Failed";
-    case "processing":
-      return "Processing";
-    case "fetching":
-      return "Fetching";
-    default:
-      return "Queued";
-  }
-}
-
-function ProgressBar({
-  progress,
-  status,
-}: {
-  progress: number;
-  status: JobStatus;
-}) {
-  const color =
-    status === "failed"
-      ? "bg-red-500"
-      : status === "finished"
-        ? "bg-emerald-500"
-        : "bg-cinema-accent";
-
-  return (
-    <div className="h-2 w-full overflow-hidden rounded-full bg-cinema-border/60">
-      <div
-        className={`h-full rounded-full transition-all duration-500 ${color}`}
-        style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
-      />
-    </div>
-  );
-}
-
 export function AdminPanel() {
   const [checking, setChecking] = useState(true);
   const [authed, setAuthed] = useState(false);
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
-  const [urlText, setUrlText] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [queueError, setQueueError] = useState("");
-  const [jobs, setJobs] = useState<LocalJob[]>([]);
-  const [library, setLibrary] = useState<LibraryItem[]>([]);
-  const [historyError, setHistoryError] = useState("");
 
-  const [linkText, setLinkText] = useState("");
-  const [linkSubmitting, setLinkSubmitting] = useState(false);
-  const [linkError, setLinkError] = useState("");
-  const [linkMessage, setLinkMessage] = useState("");
-  const [outbound, setOutbound] = useState<OutboundFilm[]>([]);
-  const [outboundKv, setOutboundKv] = useState(false);
+  const [logLines, setLogLines] = useState<string[]>(["Waiting…"]);
+  const appendLog = useCallback((lines: string | string[]) => {
+    const batch = Array.isArray(lines) ? lines : [lines];
+    setLogLines((prev) => {
+      const next = [...prev.filter((l) => l !== "Waiting…"), ...batch];
+      return next.slice(-200);
+    });
+  }, []);
 
-  const [syncEnabled, setSyncEnabled] = useState(true);
+  // Catalog sync
+  const [catalogSites, setCatalogSites] = useState<string[]>(["fpo", "playvids"]);
+  const [importPages, setImportPages] = useState(5);
   const [syncRunning, setSyncRunning] = useState(false);
-  const [syncError, setSyncError] = useState("");
+  const [syncEnabled, setSyncEnabled] = useState(true);
   const [lastRun, setLastRun] = useState<SyncLastRun | null>(null);
   const [catalogCount, setCatalogCount] = useState(0);
+  const [outboundKv, setOutboundKv] = useState(false);
+
+  // Models
+  const [modelsUrl, setModelsUrl] = useState(DEFAULT_MODELS_URL);
+  const [modelsPages, setModelsPages] = useState(10);
+  const [modelsHtml, setModelsHtml] = useState("");
+  const [modelsCount, setModelsCount] = useState(0);
+  const [modelsRunning, setModelsRunning] = useState(false);
+
+  // Search
+  const [actor, setActor] = useState("");
+  const [searchLimit, setSearchLimit] = useState(24);
+  const [searchSources, setSearchSources] = useState<string[]>(
+    SEARCH_SOURCES.map((s) => s.key)
+  );
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [publishing, setPublishing] = useState(false);
+
+  // Paste links
+  const [pasteText, setPasteText] = useState("");
+  const [pastePublishing, setPastePublishing] = useState(false);
+
+  // Recent outbound
+  const [outbound, setOutbound] = useState<OutboundFilm[]>([]);
 
   const refreshSession = useCallback(async () => {
     const { ok, data } = await api<{ authenticated?: boolean }>(
@@ -137,83 +126,36 @@ export function AdminPanel() {
     setChecking(false);
   }, []);
 
-  const refreshHistory = useCallback(async () => {
-    const { ok, data } = await api<{
-      library?: LibraryItem[];
-      error?: string;
-    }>("/api/admin/history");
-    if (!ok) {
-      setHistoryError(data.error || "Could not load Bunny library history");
-      return;
-    }
-    setHistoryError("");
-    setLibrary(data.library ?? []);
-  }, []);
-
-  const refreshOutbound = useCallback(async () => {
-    const { ok, data } = await api<{
-      films?: OutboundFilm[];
-      kv?: boolean;
-      error?: string;
-    }>("/api/admin/outbound");
-    if (!ok) return;
-    setOutbound((data.films ?? []).slice(0, 40));
-    setOutboundKv(!!data.kv);
-    setCatalogCount(data.films?.length ?? 0);
-  }, []);
-
   const refreshSync = useCallback(async () => {
     const { ok, data } = await api<{
       enabled?: boolean;
       lastRun?: SyncLastRun;
       catalogCount?: number;
       kv?: boolean;
-      error?: string;
     }>("/api/admin/sync");
-    if (!ok) {
-      setSyncError(data.error || "Could not load sync status");
-      return;
-    }
-    setSyncError("");
+    if (!ok) return;
     setSyncEnabled(data.enabled !== false);
     setLastRun(data.lastRun ?? null);
-    if (typeof data.catalogCount === "number") {
-      setCatalogCount(data.catalogCount);
-    }
+    if (typeof data.catalogCount === "number") setCatalogCount(data.catalogCount);
     if (typeof data.kv === "boolean") setOutboundKv(data.kv);
   }, []);
 
-  const jobsRef = useRef(jobs);
-  jobsRef.current = jobs;
+  const refreshOutbound = useCallback(async () => {
+    const { ok, data } = await api<{
+      films?: OutboundFilm[];
+      kv?: boolean;
+    }>("/api/admin/outbound");
+    if (!ok) return;
+    const films = data.films ?? [];
+    setOutbound(films.slice(0, 40));
+    setCatalogCount(films.length);
+    setOutboundKv(!!data.kv);
+  }, []);
 
-  const pollJobs = useCallback(async () => {
-    const active = jobsRef.current.filter(
-      (j) => j.bunnyVideoId && j.status !== "finished" && j.status !== "failed"
-    );
-    if (active.length === 0) return;
-
-    const updates = await Promise.all(
-      active.map(async (job) => {
-        const { ok, data } = await api<{
-          status?: JobStatus;
-          progress?: number;
-          title?: string;
-          message?: string;
-        }>(`/api/admin/status/${job.bunnyVideoId}`);
-        if (!ok) return job;
-        return {
-          ...job,
-          status: data.status ?? job.status,
-          progress: data.progress ?? job.progress,
-          title: data.title || job.title,
-          message: data.message ?? job.message,
-        };
-      })
-    );
-
-    setJobs((prev) =>
-      prev.map((job) => updates.find((u) => u.id === job.id) ?? job)
-    );
+  const refreshModels = useCallback(async () => {
+    const { ok, data } = await api<{ count?: number }>("/api/admin/models");
+    if (!ok) return;
+    setModelsCount(data.count ?? 0);
   }, []);
 
   useEffect(() => {
@@ -222,36 +164,20 @@ export function AdminPanel() {
 
   useEffect(() => {
     if (!authed) return;
-    void refreshHistory();
-    void refreshOutbound();
     void refreshSync();
-    const id = window.setInterval(() => {
-      void refreshHistory();
-      void pollJobs();
-    }, 4000);
-    return () => window.clearInterval(id);
-  }, [authed, refreshHistory, refreshOutbound, refreshSync, pollJobs]);
-
-  const overallProgress = useMemo(() => {
-    const active = jobs.filter((j) => j.status !== "failed");
-    if (active.length === 0) return 0;
-    return Math.round(
-      active.reduce((sum, j) => sum + j.progress, 0) / active.length
-    );
-  }, [jobs]);
+    void refreshOutbound();
+    void refreshModels();
+  }, [authed, refreshSync, refreshOutbound, refreshModels]);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setLoginError("");
     const { ok, data } = await api<{ error?: string; token?: string }>(
       "/api/admin/login",
-      {
-        method: "POST",
-        body: JSON.stringify({ password }),
-      }
+      { method: "POST", body: JSON.stringify({ password }) }
     );
     if (!ok) {
-      setLoginError(data.error || "Login failed. Is the Worker API running?");
+      setLoginError(data.error || "Login failed");
       return;
     }
     if (data.token) localStorage.setItem(SESSION_KEY, data.token);
@@ -263,107 +189,31 @@ export function AdminPanel() {
     await api("/api/admin/logout", { method: "POST" });
     localStorage.removeItem(SESSION_KEY);
     setAuthed(false);
-    setJobs([]);
   }
 
-  async function handleQueue(e: React.FormEvent) {
-    e.preventDefault();
-    setQueueError("");
-    const urls = urlText
-      .split(/\n|,/)
-      .map((u) => u.trim())
-      .filter(Boolean);
-    if (urls.length === 0) {
-      setQueueError("Paste at least one direct video URL");
-      return;
-    }
-
-    setSubmitting(true);
-    const { ok, data } = await api<{
-      jobs?: LocalJob[];
-      error?: string;
-    }>("/api/admin/queue", {
-      method: "POST",
-      body: JSON.stringify({ urls }),
-    });
-    setSubmitting(false);
-
-    if (!ok) {
-      setQueueError(data.error || "Queue failed");
-      return;
-    }
-
-    setJobs((prev) => [...(data.jobs ?? []), ...prev]);
-    setUrlText("");
-    void refreshHistory();
-  }
-
-  async function handlePublishLinks(e: React.FormEvent) {
-    e.preventDefault();
-    setLinkError("");
-    setLinkMessage("");
-    const lines = linkText
-      .split(/\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-    if (lines.length === 0) {
-      setLinkError("Paste at least one page URL");
-      return;
-    }
-
-    const films = lines.map((line) => {
-      const parts = line.split(/\s+\|\s+/);
-      const sourceUrl = (parts[0] || "").trim();
-      const title = (parts[1] || sourceUrl).trim();
-      return { sourceUrl, title };
-    });
-
-    setLinkSubmitting(true);
-    const before = catalogCount;
-    const { ok, data } = await api<{
-      count?: number;
-      added?: number;
-      persisted?: boolean;
-      error?: string;
-      message?: string;
-    }>("/api/admin/outbound", {
-      method: "POST",
-      body: JSON.stringify({ films }),
-    });
-    setLinkSubmitting(false);
-
-    if (!ok) {
-      setLinkError(data.error || data.message || "Publish failed");
-      return;
-    }
-
-    const nextCount = data.count ?? catalogCount;
-    const skippedAll = before === nextCount && films.length > 0;
-    setLinkMessage(
-      skippedAll
-        ? `No new links — ${films.length} duplicate(s) skipped. Catalog size: ${nextCount}`
-        : `Published. Catalog size: ${nextCount}` +
-            (data.persisted === false ? " (KV not bound — not live yet)" : "")
+  function toggleCatalogSite(key: string) {
+    setCatalogSites((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
     );
-    setLinkText("");
-    setCatalogCount(nextCount);
-    void refreshOutbound();
-    void refreshSync();
   }
 
-  async function handleDeleteOutbound(id: string) {
-    const { ok } = await api(`/api/admin/outbound/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-    });
-    if (ok) {
-      void refreshOutbound();
-      void refreshSync();
+  function toggleSearchSource(key: string) {
+    setSearchSources((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  }
+
+  async function runSync(untilCaughtUp: boolean) {
+    if (catalogSites.length === 0) {
+      appendLog("Select at least one catalog site");
+      return;
     }
-  }
-
-  async function handleSyncNow() {
-    setSyncError("");
     setSyncRunning(true);
+    appendLog(
+      untilCaughtUp
+        ? "Starting Sync new…"
+        : `Starting Import all (up to ${importPages} pages)…`
+    );
     const { ok, data } = await api<{
       ok?: boolean;
       added?: number;
@@ -378,38 +228,23 @@ export function AdminPanel() {
     }>("/api/admin/sync", {
       method: "POST",
       body: JSON.stringify({
-        sites: ["fpo", "playvids"],
-        maxPages: 5,
-        untilCaughtUp: true,
+        sites: catalogSites,
+        maxPages: Math.min(20, Math.max(1, importPages)),
+        untilCaughtUp,
       }),
     });
     setSyncRunning(false);
-
+    if (data.log?.length) appendLog(data.log);
     if (!ok || data.ok === false) {
-      setSyncError(data.error || "Sync failed");
-      if (data.finishedAt) {
-        setLastRun({
-          ok: false,
-          added: data.added ?? 0,
-          skipped: data.skipped ?? 0,
-          pages: data.pages ?? 0,
-          sites: data.sites ?? [],
-          count: data.count ?? catalogCount,
-          error: data.error,
-          log: data.log,
-          finishedAt: data.finishedAt,
-          trigger: data.trigger || "admin",
-        });
-      }
+      appendLog(data.error || "Sync failed");
       return;
     }
-
     setLastRun({
       ok: true,
       added: data.added ?? 0,
       skipped: data.skipped ?? 0,
       pages: data.pages ?? 0,
-      sites: data.sites ?? ["fpo", "playvids"],
+      sites: data.sites ?? catalogSites,
       count: data.count ?? catalogCount,
       log: data.log,
       finishedAt: data.finishedAt || new Date().toISOString(),
@@ -419,7 +254,15 @@ export function AdminPanel() {
     void refreshOutbound();
   }
 
-  async function handleToggleAutoSync() {
+  async function stopSync() {
+    await api("/api/admin/sync", {
+      method: "POST",
+      body: JSON.stringify({ action: "stop" }),
+    });
+    appendLog("Stop requested for catalog import");
+  }
+
+  async function toggleAutoSync() {
     const next = !syncEnabled;
     setSyncEnabled(next);
     const { ok, data } = await api<{ enabled?: boolean; error?: string }>(
@@ -431,10 +274,215 @@ export function AdminPanel() {
     );
     if (!ok) {
       setSyncEnabled(!next);
-      setSyncError(data.error || "Could not update auto-sync");
+      appendLog(data.error || "Could not update auto-scrape");
       return;
     }
-    setSyncEnabled(data.enabled !== false);
+    appendLog(`Auto-scrape ${data.enabled !== false ? "On" : "Off"}`);
+  }
+
+  async function importModels() {
+    setModelsRunning(true);
+    appendLog(`Importing models from ${modelsUrl}…`);
+    const { ok, data } = await api<{
+      added?: number;
+      skipped?: number;
+      scraped?: number;
+      total?: number;
+      error?: string;
+      log?: string[];
+      synced?: boolean;
+    }>("/api/admin/models", {
+      method: "POST",
+      body: JSON.stringify({
+        url: modelsUrl,
+        maxPages: Math.min(20, Math.max(1, modelsPages)),
+      }),
+    });
+    setModelsRunning(false);
+    if (data.log?.length) appendLog(data.log);
+    if (!ok) {
+      appendLog(data.error || "Model import failed");
+      return;
+    }
+    appendLog(
+      `Models: +${data.added ?? 0} new, ${data.skipped ?? 0} skipped, total ${data.total ?? 0}`
+    );
+    setModelsCount(data.total ?? modelsCount);
+  }
+
+  async function importModelsHtml() {
+    setModelsRunning(true);
+    appendLog("Importing models from pasted HTML…");
+    const { ok, data } = await api<{
+      added?: number;
+      skipped?: number;
+      total?: number;
+      error?: string;
+      log?: string[];
+    }>("/api/admin/models", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "import-html",
+        html: modelsHtml,
+        url: modelsUrl,
+      }),
+    });
+    setModelsRunning(false);
+    if (data.log?.length) appendLog(data.log);
+    if (!ok) {
+      appendLog(data.error || "HTML import failed");
+      return;
+    }
+    appendLog(
+      `Models from HTML: +${data.added ?? 0} new, ${data.skipped ?? 0} skipped, total ${data.total ?? 0}`
+    );
+    setModelsCount(data.total ?? modelsCount);
+    setModelsHtml("");
+  }
+
+  async function stopModels() {
+    await api("/api/admin/models/stop", { method: "POST" });
+    appendLog("Stop requested for model import");
+  }
+
+  async function runSearch() {
+    const name = actor.trim();
+    if (!name) {
+      appendLog("Enter an actor name");
+      return;
+    }
+    if (searchSources.length === 0) {
+      appendLog("Select at least one search source");
+      return;
+    }
+    setSearching(true);
+    setResults([]);
+    setSelected(new Set());
+    appendLog(`Searching for “${name}”…`);
+    const { ok, data } = await api<{
+      results?: SearchResult[];
+      log?: string[];
+      modelsCount?: number;
+      error?: string;
+      count?: number;
+    }>("/api/admin/search", {
+      method: "POST",
+      body: JSON.stringify({
+        actor: name,
+        sources: searchSources,
+        limit: searchLimit,
+      }),
+    });
+    setSearching(false);
+    if (data.log?.length) appendLog(data.log);
+    if (!ok) {
+      appendLog(data.error || "Search failed");
+      return;
+    }
+    const list = data.results ?? [];
+    setResults(list);
+    const selectable = list.filter((r) => r.url && !r.error).map((r) => r.url);
+    setSelected(new Set(selectable));
+    if (typeof data.modelsCount === "number") setModelsCount(data.modelsCount);
+    appendLog(`Found ${data.count ?? selectable.length} video link(s)`);
+  }
+
+  function selectAllResults() {
+    setSelected(
+      new Set(results.filter((r) => r.url && !r.error).map((r) => r.url))
+    );
+  }
+
+  function selectNoneResults() {
+    setSelected(new Set());
+  }
+
+  async function publishSelected() {
+    const items = results.filter(
+      (r) => r.url && !r.error && selected.has(r.url)
+    );
+    if (items.length === 0) {
+      appendLog("Select at least one search result");
+      return;
+    }
+    setPublishing(true);
+    appendLog(`Publishing ${items.length} link(s)…`);
+    const films = items.map((item) => ({
+      sourceUrl: item.url,
+      title: item.title,
+      posterUrl: item.poster || undefined,
+      actor: item.actor || actor.trim() || undefined,
+      site: item.site,
+    }));
+    const { ok, data } = await api<{
+      count?: number;
+      error?: string;
+      message?: string;
+      persisted?: boolean;
+    }>("/api/admin/outbound", {
+      method: "POST",
+      body: JSON.stringify({ films }),
+    });
+    setPublishing(false);
+    if (!ok) {
+      appendLog(data.error || data.message || "Publish failed");
+      return;
+    }
+    appendLog(
+      `Published. Catalog size: ${data.count ?? "?"}${
+        data.persisted === false ? " (KV missing)" : ""
+      }`
+    );
+    setCatalogCount(data.count ?? catalogCount);
+    void refreshOutbound();
+  }
+
+  async function publishPasted() {
+    const lines = pasteText
+      .split(/\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length === 0) {
+      appendLog("Paste at least one URL");
+      return;
+    }
+    setPastePublishing(true);
+    const films = lines.map((line) => {
+      const parts = line.split(/\s+\|\s+/);
+      return {
+        sourceUrl: (parts[0] || "").trim(),
+        title: (parts[1] || parts[0] || "").trim(),
+        actor: actor.trim() || undefined,
+      };
+    });
+    appendLog(`Publishing ${films.length} pasted link(s)…`);
+    const { ok, data } = await api<{
+      count?: number;
+      error?: string;
+      message?: string;
+    }>("/api/admin/outbound", {
+      method: "POST",
+      body: JSON.stringify({ films }),
+    });
+    setPastePublishing(false);
+    if (!ok) {
+      appendLog(data.error || data.message || "Publish failed");
+      return;
+    }
+    appendLog(`Published pasted links. Catalog size: ${data.count ?? "?"}`);
+    setPasteText("");
+    setCatalogCount(data.count ?? catalogCount);
+    void refreshOutbound();
+  }
+
+  async function handleDeleteOutbound(id: string) {
+    const { ok } = await api(`/api/admin/outbound/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    if (ok) {
+      appendLog(`Removed ${id}`);
+      void refreshOutbound();
+    }
   }
 
   if (checking) {
@@ -451,7 +499,7 @@ export function AdminPanel() {
       >
         <h2 className="font-display text-2xl text-cinema-text">Admin login</h2>
         <p className="text-sm text-cinema-muted">
-          Enter the admin password to manage outbound links and Bunny downloads.
+          Password-protected tools for outbound video links and model imports.
         </p>
         <input
           type="password"
@@ -475,13 +523,23 @@ export function AdminPanel() {
   }
 
   return (
-    <div className="space-y-10">
-      <div className="flex items-center justify-between gap-4">
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 className="font-display text-2xl text-cinema-text">Admin</h2>
-          <p className="mt-1 text-sm text-cinema-muted">
-            Publish outbound links and auto-scrape newest listings on Cloudflare
-            (runs even when your computer is off).
+          <h2 className="font-display text-2xl text-cinema-text">
+            Links &amp; models
+          </h2>
+          <p className="mt-1 max-w-2xl text-sm text-cinema-muted">
+            Search by actor or sync newest listings, then publish outbound
+            links. Import model names and pictures for the Models page. Bunny
+            downloads stay in the local Python tool.
+          </p>
+          <p className="mt-2 font-mono text-xs text-cinema-muted">
+            Links {catalogCount.toLocaleString()} · Models{" "}
+            {modelsCount.toLocaleString()} · KV {outboundKv ? "on" : "missing"}
+            {lastRun
+              ? ` · Last sync ${new Date(lastRun.finishedAt).toLocaleString()} (+${lastRun.added})`
+              : ""}
           </p>
         </div>
         <button
@@ -493,261 +551,351 @@ export function AdminPanel() {
         </button>
       </div>
 
-      <section className="space-y-4 rounded-lg border border-cinema-border/50 bg-cinema-card p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h3 className="font-display text-xl text-cinema-text">
-              Auto-scrape (cloud)
-            </h3>
-            <p className="mt-1 text-sm text-cinema-muted">
-              Every 6 hours Cloudflare pulls newest FPO / Playvids pages, skips
-              duplicates, and publishes as outbound links. No yt-dlp / Bunny
-              download — link catalog only.
-            </p>
-          </div>
-          <span className="text-sm text-cinema-muted">
-            Catalog: {catalogCount.toLocaleString()} · KV{" "}
-            {outboundKv ? "on" : "missing"}
-          </span>
+      {/* Catalog import */}
+      <section className="space-y-3 rounded-lg border border-cinema-border/50 bg-cinema-card p-5">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-cinema-muted">
+          Import from FPO / Playvids
+        </h3>
+        <p className="text-sm text-cinema-muted">
+          <strong className="text-cinema-text">Sync new</strong> pulls newest
+          pages and stops when links are already on the site.{" "}
+          <strong className="text-cinema-text">Import all</strong> crawls up to
+          max pages (capped at 20 per run on Cloudflare). Auto-scrape runs every
+          6 hours when On.
+        </p>
+        <div className="flex flex-wrap gap-4 text-sm text-cinema-muted">
+          {CATALOG_SOURCES.map((s) => (
+            <label key={s.key} className="inline-flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={catalogSites.includes(s.key)}
+                onChange={() => toggleCatalogSite(s.key)}
+              />
+              {s.label}
+            </label>
+          ))}
         </div>
-
-        <div className="flex flex-wrap gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="text-sm text-cinema-muted">Max pages</label>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            value={importPages}
+            onChange={(e) => setImportPages(Number(e.target.value) || 5)}
+            className="w-20 rounded-md border border-cinema-border bg-cinema-dark px-2 py-1.5 text-cinema-text"
+          />
           <button
             type="button"
-            onClick={() => void handleSyncNow()}
             disabled={syncRunning || !outboundKv}
-            className="rounded-md bg-cinema-accent px-4 py-2 font-medium text-cinema-black transition hover:bg-cinema-accent-hover disabled:opacity-60"
+            onClick={() => void runSync(true)}
+            className="rounded-full bg-cinema-accent px-4 py-2 text-sm font-semibold text-cinema-black disabled:opacity-50"
           >
-            {syncRunning ? "Syncing…" : "Sync new now"}
+            Sync new
           </button>
           <button
             type="button"
-            onClick={() => void handleToggleAutoSync()}
+            disabled={syncRunning || !outboundKv}
+            onClick={() => void runSync(false)}
+            className="rounded-full border border-cinema-border px-4 py-2 text-sm font-semibold text-cinema-text disabled:opacity-50"
+          >
+            Import all
+          </button>
+          <button
+            type="button"
+            disabled={!syncRunning}
+            onClick={() => void stopSync()}
+            className="rounded-full border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-400 disabled:opacity-50"
+          >
+            Stop import
+          </button>
+          <button
+            type="button"
             disabled={!outboundKv}
-            className="rounded-md border border-cinema-border px-4 py-2 text-sm text-cinema-text hover:border-cinema-accent disabled:opacity-60"
+            onClick={() => void toggleAutoSync()}
+            className="rounded-full border border-cinema-border px-4 py-2 text-sm text-cinema-text disabled:opacity-50"
           >
             Auto-scrape: {syncEnabled ? "On" : "Off"}
           </button>
         </div>
-
-        {syncError ? <p className="text-sm text-red-400">{syncError}</p> : null}
-
-        {lastRun ? (
-          <div className="space-y-2 rounded-md border border-cinema-border/40 bg-cinema-dark/40 p-3 text-sm text-cinema-muted">
-            <p>
-              Last run ({lastRun.trigger}):{" "}
-              <span
-                className={lastRun.ok ? "text-emerald-400" : "text-red-400"}
-              >
-                {lastRun.ok ? "ok" : "failed"}
-              </span>
-              {" · "}+{lastRun.added} new · {lastRun.skipped} skipped ·{" "}
-              {lastRun.pages} pages ·{" "}
-              {new Date(lastRun.finishedAt).toLocaleString()}
-            </p>
-            {lastRun.error ? (
-              <p className="text-red-400">{lastRun.error}</p>
-            ) : null}
-            {lastRun.log?.length ? (
-              <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-xs text-cinema-muted">
-                {lastRun.log.slice(-12).join("\n")}
-              </pre>
-            ) : null}
-          </div>
-        ) : (
-          <p className="text-sm text-cinema-muted">
-            No sync has run yet. Click “Sync new now” or wait for the 6-hour cron
-            after deploy.
-          </p>
-        )}
       </section>
 
-      <section className="space-y-4">
-        <h3 className="font-display text-xl text-cinema-text">
-          Publish as links
+      {/* Models import */}
+      <section className="space-y-3 rounded-lg border border-cinema-border/50 bg-cinema-card p-5">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-cinema-muted">
+          Import models
         </h3>
         <p className="text-sm text-cinema-muted">
-          One URL per line. Optional title after{" "}
-          <code className="text-cinema-accent"> | </code>
-          (example:{" "}
-          <code className="text-xs text-cinema-accent">
-            https://…/video/… | My title
-          </code>
-          ). Viewers hit your ad page then the source site — no download.
+          Default source is the Indexxx GirlCum models list. If Cloudflare
+          blocks auto-fetch, open the page in your browser and paste HTML below.
         </p>
-        <form onSubmit={handlePublishLinks} className="space-y-3">
-          <textarea
-            value={linkText}
-            onChange={(e) => setLinkText(e.target.value)}
-            rows={5}
-            placeholder={
-              "https://www.fpo.xxx/video/123/title/\nhttps://www.playvids.com/abc123/title | Custom title"
-            }
-            className="w-full rounded-md border border-cinema-border bg-cinema-card px-3 py-2 font-mono text-sm text-cinema-text outline-none focus:border-cinema-accent"
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            type="url"
+            value={modelsUrl}
+            onChange={(e) => setModelsUrl(e.target.value)}
+            className="min-w-[220px] flex-1 rounded-md border border-cinema-border bg-cinema-dark px-3 py-2 text-sm text-cinema-text"
           />
-          {linkError ? <p className="text-sm text-red-400">{linkError}</p> : null}
-          {linkMessage ? (
-            <p className="text-sm text-emerald-400">{linkMessage}</p>
-          ) : null}
+          <label className="text-sm text-cinema-muted">Max pages</label>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            value={modelsPages}
+            onChange={(e) => setModelsPages(Number(e.target.value) || 10)}
+            className="w-20 rounded-md border border-cinema-border bg-cinema-dark px-2 py-1.5 text-cinema-text"
+          />
           <button
-            type="submit"
-            disabled={linkSubmitting}
-            className="rounded-md bg-cinema-accent px-4 py-2 font-medium text-cinema-black transition hover:bg-cinema-accent-hover disabled:opacity-60"
+            type="button"
+            disabled={modelsRunning || !outboundKv}
+            onClick={() => void importModels()}
+            className="rounded-full bg-cinema-accent px-4 py-2 text-sm font-semibold text-cinema-black disabled:opacity-50"
           >
-            {linkSubmitting ? "Publishing…" : "Publish as links"}
+            Import models
           </button>
-        </form>
-
-        {outbound.length > 0 ? (
-          <ul className="space-y-2">
-            {outbound.map((film) => (
-              <li
-                key={film.id}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cinema-border/50 bg-cinema-card px-4 py-3"
-              >
-                <div className="min-w-0 flex-1">
-                  <p className="truncate font-medium text-cinema-text">
-                    {film.title}
-                  </p>
-                  <p className="truncate text-xs text-cinema-muted">
-                    {film.site ? `${film.site} · ` : ""}
-                    {film.sourceUrl}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void handleDeleteOutbound(film.id)}
-                  className="shrink-0 text-xs text-red-400 hover:underline"
-                >
-                  Remove
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
+          <button
+            type="button"
+            disabled={!modelsRunning}
+            onClick={() => void stopModels()}
+            className="rounded-full border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-400 disabled:opacity-50"
+          >
+            Stop
+          </button>
+        </div>
+        <details className="border-t border-cinema-border/40 pt-3">
+          <summary className="cursor-pointer text-sm font-semibold text-cinema-muted">
+            Paste page HTML (recommended if Cloudflare blocks)
+          </summary>
+          <p className="mt-2 text-sm text-cinema-muted">
+            View Page Source on Indexxx → select all → paste. Also paste from
+            …/models2/ for the full name list.
+          </p>
+          <textarea
+            value={modelsHtml}
+            onChange={(e) => setModelsHtml(e.target.value)}
+            rows={5}
+            placeholder="Paste Indexxx models page HTML here"
+            className="mt-2 w-full rounded-md border border-cinema-border bg-cinema-dark px-3 py-2 font-mono text-xs text-cinema-text"
+          />
+          <button
+            type="button"
+            disabled={modelsRunning || !modelsHtml.trim()}
+            onClick={() => void importModelsHtml()}
+            className="mt-2 rounded-full border border-cinema-border px-4 py-2 text-sm font-semibold text-cinema-text disabled:opacity-50"
+          >
+            Import pasted HTML
+          </button>
+        </details>
+        <p className="text-sm text-cinema-muted">
+          Models on site:{" "}
+          <strong className="text-cinema-text">{modelsCount}</strong>
+        </p>
       </section>
 
-      <div className="border-t border-cinema-border/40 pt-8">
-        <div className="mb-4">
-          <h2 className="font-display text-2xl text-cinema-text">
-            Bunny download queue
-          </h2>
-          <p className="mt-1 text-sm text-cinema-muted">
-            Paste direct video file URLs (e.g. ending in .mp4). Bunny fetches
-            them into library 700551. Tube site page URLs usually will not work
-            here — use Publish as links or the local Python tool for those.
-          </p>
-        </div>
-
-        <form onSubmit={handleQueue} className="space-y-3">
-          <textarea
-            value={urlText}
-            onChange={(e) => setUrlText(e.target.value)}
-            rows={5}
-            placeholder={
-              "https://cdn.example.com/video1.mp4\nhttps://cdn.example.com/video2.mp4"
-            }
-            className="w-full rounded-md border border-cinema-border bg-cinema-card px-3 py-2 font-mono text-sm text-cinema-text outline-none focus:border-cinema-accent"
-          />
-          {queueError ? (
-            <p className="text-sm text-red-400">{queueError}</p>
-          ) : null}
-          <button
-            type="submit"
-            disabled={submitting}
-            className="rounded-md bg-cinema-accent px-4 py-2 font-medium text-cinema-black transition hover:bg-cinema-accent-hover disabled:opacity-60"
-          >
-            {submitting ? "Sending to Bunny…" : "Queue downloads"}
-          </button>
-        </form>
-      </div>
-
-      {jobs.length > 0 ? (
-        <section className="space-y-4">
-          <div className="flex items-end justify-between gap-4">
-            <h3 className="font-display text-xl text-cinema-text">
-              This session
-            </h3>
-            <span className="text-sm text-cinema-muted">
-              Overall {overallProgress}%
-            </span>
+      <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+        {/* Find by actor */}
+        <section className="space-y-3 rounded-lg border border-cinema-border/50 bg-cinema-card p-5">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-cinema-muted">
+            Find by actor
+          </h3>
+          <div className="flex flex-wrap gap-2">
+            <input
+              type="text"
+              value={actor}
+              onChange={(e) => setActor(e.target.value)}
+              placeholder="Actor name"
+              className="min-w-[180px] flex-1 rounded-md border border-cinema-border bg-cinema-dark px-3 py-2 text-cinema-text"
+            />
+            <input
+              type="number"
+              min={1}
+              max={60}
+              value={searchLimit}
+              onChange={(e) => setSearchLimit(Number(e.target.value) || 24)}
+              title="Results per site"
+              className="w-20 rounded-md border border-cinema-border bg-cinema-dark px-2 py-2 text-cinema-text"
+            />
+            <button
+              type="button"
+              disabled={searching}
+              onClick={() => void runSearch()}
+              className="rounded-full bg-cinema-accent px-4 py-2 text-sm font-semibold text-cinema-black disabled:opacity-50"
+            >
+              {searching ? "Searching…" : "Search"}
+            </button>
           </div>
-          <ProgressBar progress={overallProgress} status="processing" />
-          <ul className="space-y-3">
-            {jobs.map((job) => (
-              <li
-                key={job.id}
-                className="rounded-lg border border-cinema-border/50 bg-cinema-card p-4"
-              >
-                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-medium text-cinema-text">{job.title}</p>
-                  <span className="text-xs uppercase tracking-wide text-cinema-muted">
-                    {statusLabel(job.status)} · {job.progress}%
-                  </span>
-                </div>
-                <ProgressBar progress={job.progress} status={job.status} />
-                <p className="mt-2 truncate text-xs text-cinema-muted">
-                  {job.url}
-                </p>
-                {job.message ? (
-                  <p className="mt-1 text-xs text-cinema-muted">{job.message}</p>
-                ) : null}
-                {job.bunnyVideoId ? (
-                  <p className="mt-1 font-mono text-xs text-cinema-accent">
-                    {job.bunnyVideoId}
-                  </p>
-                ) : null}
-              </li>
+          <div className="flex flex-wrap gap-3 text-sm text-cinema-muted">
+            {SEARCH_SOURCES.map((s) => (
+              <label key={s.key} className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={searchSources.includes(s.key)}
+                  onChange={() => toggleSearchSource(s.key)}
+                />
+                {s.label}
+              </label>
             ))}
+          </div>
+          <p className="text-sm text-cinema-muted">
+            Actor is auto-added to Models when videos are found. Publish as
+            links = thumbnail + ad redirect (no download).
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={selectAllResults}
+              className="rounded-full border border-cinema-border px-3 py-1.5 text-sm text-cinema-text"
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              onClick={selectNoneResults}
+              className="rounded-full border border-cinema-border px-3 py-1.5 text-sm text-cinema-text"
+            >
+              Select none
+            </button>
+            <button
+              type="button"
+              disabled={publishing || selected.size === 0}
+              onClick={() => void publishSelected()}
+              className="rounded-full bg-cinema-accent px-4 py-1.5 text-sm font-semibold text-cinema-black disabled:opacity-50"
+            >
+              {publishing ? "Publishing…" : "Publish as links"}
+            </button>
+          </div>
+          <ul className="max-h-80 space-y-1 overflow-auto rounded-md border border-cinema-border/40 bg-cinema-dark/30 p-2">
+            {results.length === 0 ? (
+              <li className="p-3 text-sm text-cinema-muted">
+                Search results will show up here.
+              </li>
+            ) : (
+              results.map((r, i) =>
+                r.error ? (
+                  <li
+                    key={`err-${i}`}
+                    className="px-2 py-2 text-sm text-red-400"
+                  >
+                    {r.title}
+                  </li>
+                ) : (
+                  <li
+                    key={r.url}
+                    className="flex gap-2 rounded-md px-2 py-2 hover:bg-cinema-border/20"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(r.url)}
+                      onChange={() => {
+                        setSelected((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(r.url)) next.delete(r.url);
+                          else next.add(r.url);
+                          return next;
+                        });
+                      }}
+                      className="mt-1"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-cinema-text">
+                        {r.title}
+                      </p>
+                      <p className="truncate font-mono text-[11px] text-cinema-muted">
+                        <span className="mr-1 rounded-full bg-cinema-accent/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-cinema-accent">
+                          {r.site}
+                        </span>
+                        {r.url}
+                      </p>
+                    </div>
+                  </li>
+                )
+              )
+            )}
+          </ul>
+
+          <details className="border-t border-cinema-border/40 pt-3">
+            <summary className="cursor-pointer text-sm font-semibold text-cinema-muted">
+              Or paste URLs manually
+            </summary>
+            <textarea
+              value={pasteText}
+              onChange={(e) => setPasteText(e.target.value)}
+              rows={4}
+              placeholder={"One URL per line\noptional: url | title"}
+              className="mt-2 w-full rounded-md border border-cinema-border bg-cinema-dark px-3 py-2 font-mono text-xs text-cinema-text"
+            />
+            <button
+              type="button"
+              disabled={pastePublishing}
+              onClick={() => void publishPasted()}
+              className="mt-2 rounded-full bg-cinema-accent px-4 py-2 text-sm font-semibold text-cinema-black disabled:opacity-50"
+            >
+              {pastePublishing ? "Publishing…" : "Publish as links"}
+            </button>
+          </details>
+        </section>
+
+        {/* Status / recent links */}
+        <section className="space-y-3 rounded-lg border border-cinema-border/50 bg-cinema-card p-5">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-cinema-muted">
+            Catalog status
+          </h3>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-md bg-cinema-dark/40 p-3">
+              <strong className="block text-2xl text-cinema-text">
+                {catalogCount.toLocaleString()}
+              </strong>
+              <span className="text-xs uppercase tracking-wide text-cinema-muted">
+                Links
+              </span>
+            </div>
+            <div className="rounded-md bg-cinema-dark/40 p-3">
+              <strong className="block text-2xl text-cinema-text">
+                {modelsCount.toLocaleString()}
+              </strong>
+              <span className="text-xs uppercase tracking-wide text-cinema-muted">
+                Models
+              </span>
+            </div>
+          </div>
+          <ul className="max-h-80 space-y-2 overflow-auto">
+            {outbound.length === 0 ? (
+              <li className="text-sm text-cinema-muted">No recent links.</li>
+            ) : (
+              outbound.map((film) => (
+                <li
+                  key={film.id}
+                  className="flex items-start justify-between gap-2 rounded-md border border-cinema-border/40 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-cinema-text">
+                      {film.title}
+                    </p>
+                    <p className="truncate font-mono text-[11px] text-cinema-muted">
+                      {film.sourceUrl}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteOutbound(film.id)}
+                    className="shrink-0 text-xs text-red-400 hover:underline"
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))
+            )}
           </ul>
         </section>
-      ) : null}
+      </div>
 
-      <section className="space-y-4">
-        <h3 className="font-display text-xl text-cinema-text">
-          Bunny library history
+      <section className="rounded-lg border border-cinema-border/50 bg-cinema-card p-5">
+        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-cinema-muted">
+          Activity
         </h3>
-        {historyError ? (
-          <p className="text-sm text-red-400">{historyError}</p>
-        ) : null}
-        {library.length === 0 ? (
-          <p className="text-sm text-cinema-muted">
-            No videos in the library yet.
-          </p>
-        ) : (
-          <ul className="space-y-3">
-            {library.map((item) => (
-              <li
-                key={item.bunnyVideoId}
-                className="rounded-lg border border-cinema-border/50 bg-cinema-card p-4"
-              >
-                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-medium text-cinema-text">{item.title}</p>
-                  <span className="text-xs uppercase tracking-wide text-cinema-muted">
-                    {statusLabel(item.status)} · {item.progress}%
-                  </span>
-                </div>
-                <ProgressBar progress={item.progress} status={item.status} />
-                <div className="mt-2 flex flex-wrap gap-3 text-xs text-cinema-muted">
-                  {item.dateUploaded ? (
-                    <span>
-                      {new Date(item.dateUploaded).toLocaleString()}
-                    </span>
-                  ) : null}
-                  <a
-                    href={item.embedUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-cinema-accent hover:underline"
-                  >
-                    Open embed
-                  </a>
-                  <span className="font-mono">{item.bunnyVideoId}</span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+        <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-md border border-cinema-border/40 bg-cinema-dark/40 p-3 font-mono text-xs leading-relaxed text-cinema-muted">
+          {logLines.join("\n")}
+        </pre>
       </section>
     </div>
   );
