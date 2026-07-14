@@ -17,7 +17,7 @@ import {
   type SyncResult,
 } from "./catalog-sync";
 import {
-  INDEXXX_GIRLCUM_MODELS,
+  DEFAULT_MODELS_URL,
   importModelsFromHtml,
   importModelsFromUrl,
   loadSiteModelsFromKv,
@@ -1048,13 +1048,13 @@ async function handleAdminApi(
         const result = await importModelsFromHtml(
           env,
           String(body.html || ""),
-          String(body.url || INDEXXX_GIRLCUM_MODELS),
+          String(body.url || DEFAULT_MODELS_URL),
           existing
         );
         return jsonFresh({ ok: true, ...result });
       }
 
-      const url = String(body.url || INDEXXX_GIRLCUM_MODELS).trim();
+      const url = String(body.url || DEFAULT_MODELS_URL).trim();
       const result = await importModelsFromUrl(
         env,
         url,

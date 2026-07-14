@@ -26,7 +26,9 @@ export const INDEXXX_GIRLCUM_MODELS =
   "https://www.indexxx.com/websites/10182/girlcum.com/models";
 
 const USER_AGENT =
-  "Mozilla/5.0 (compatible; BangHeroesCatalogBot/1.0; +https://bangheroes.com)";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+export const DEFAULT_MODELS_URL = "https://porndoe.com/pornstars";
 
 function decodeHtmlEntities(text: string): string {
   return text
@@ -97,7 +99,7 @@ export function mergeModelRecords(
   existing: SiteModelRecord[],
   scraped: ScrapedModel[],
   now: string
-): { merged: SiteModelRecord[]; added: number; skipped: number } {
+): { merged: SiteModelRecord[]; added: number; skipped: number; updated: number } {
   const seenKeys = new Set<string>();
   const merged: SiteModelRecord[] = [];
 
@@ -108,6 +110,7 @@ export function mergeModelRecords(
 
   let added = 0;
   let skipped = 0;
+  let updated = 0;
   for (const item of scraped) {
     const name = (item.name || "").trim();
     if (!name) continue;
@@ -135,7 +138,7 @@ export function mergeModelRecords(
       }
     }
     if (overlap) {
-      skipped += 1;
+      let didUpdate = false;
       for (let i = 0; i < merged.length; i++) {
         const existingKeys = modelRecordKeys(merged[i]);
         let hit = false;
@@ -146,14 +149,31 @@ export function mergeModelRecords(
           }
         }
         if (!hit) continue;
-        const updated = { ...merged[i] };
-        if (record.poster) updated.poster = record.poster;
-        if (record.sourceSite && !updated.sourceSite) {
-          updated.sourceSite = record.sourceSite;
+        const prev = merged[i];
+        const next = { ...prev };
+        // Always overwrite picture / profile when the import has them
+        if (record.poster) {
+          if (next.poster !== record.poster) didUpdate = true;
+          next.poster = record.poster;
         }
-        merged[i] = updated;
+        if (record.profileUrl) {
+          if (next.profileUrl !== record.profileUrl) didUpdate = true;
+          next.profileUrl = record.profileUrl;
+        }
+        if (record.sourceSite) {
+          next.sourceSite = record.sourceSite;
+        }
+        // Prefer the cleaner display name from the listing when present
+        if (record.name && record.name !== next.name) {
+          next.name = record.name;
+          next.slug = record.slug;
+          didUpdate = true;
+        }
+        merged[i] = next;
         break;
       }
+      if (didUpdate) updated += 1;
+      else skipped += 1;
       continue;
     }
     for (const k of keys) seenKeys.add(k);
@@ -164,7 +184,7 @@ export function mergeModelRecords(
   merged.sort((a, b) =>
     (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase())
   );
-  return { merged, added, skipped };
+  return { merged, added, skipped, updated };
 }
 
 export function normalizeModelsListUrl(listUrl: string): string {
@@ -236,11 +256,20 @@ function modelsListingPageUrl(listUrl: string, page: number): string | null {
 }
 
 async function fetchHtml(url: string): Promise<string> {
+  let referer = "https://www.google.com/";
+  try {
+    referer = new URL(url).origin + "/";
+  } catch {
+    /* ignore */
+  }
   const res = await fetch(url, {
     headers: {
       "user-agent": USER_AGENT,
-      accept: "text/html,application/xhtml+xml",
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
       "accept-language": "en-US,en;q=0.9",
+      referer,
+      "cache-control": "no-cache",
     },
     redirect: "follow",
   });
@@ -252,6 +281,15 @@ async function fetchHtml(url: string): Promise<string> {
     )
   ) {
     throw new Error(`Cloudflare challenge blocked ${url}`);
+  }
+  if (
+    /age verification|will not be offering its service in your area|mandated age verification/i.test(
+      html
+    )
+  ) {
+    throw new Error(
+      `Age-gate / geo block on ${url}. Open the page in your browser and use Paste page HTML.`
+    );
   }
   return html;
 }
@@ -380,6 +418,85 @@ export function parseFpoModelsPage(html: string, limit: number): ScrapedModel[] 
     });
     if (out.length >= limit) break;
   }
+  return out;
+}
+
+/**
+ * Porndoe /pornstars listing cards:
+ * <a href="/pornstars-profile/slug" title="Name">
+ *   <svg data-src="https://p.cdnc.porndoe.com/image/porn_star/...jpg">
+ *   Name
+ * </a>
+ */
+export function parsePorndoeModelsPage(
+  html: string,
+  baseUrl: string,
+  limit: number
+): ScrapedModel[] {
+  let origin = "https://porndoe.com";
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch {
+    /* ignore */
+  }
+
+  const out: ScrapedModel[] = [];
+  const seen = new Set<string>();
+
+  const cards = [
+    ...html.matchAll(
+      /<a\s+href="(\/pornstars-profile\/[^"#?]+)"[^>]*title="([^"]+)"[^>]*>[\s\S]*?data-src="(https?:\/\/[^"]+)"/gi
+    ),
+  ];
+
+  for (const m of cards) {
+    const href = m[1];
+    const name = decodeHtmlEntities(m[2]).trim();
+    const poster = m[3].trim();
+    if (!name || !poster) continue;
+    const profileUrl =
+      (href.startsWith("http") ? href : origin + href).replace(/\/+$/, "") +
+      "/";
+    if (seen.has(profileUrl)) continue;
+    seen.add(profileUrl);
+    out.push({
+      name,
+      poster,
+      profileUrl,
+      sourceSite: "porndoe.com",
+    });
+    if (out.length >= limit) break;
+  }
+
+  if (out.length > 0) return out;
+
+  // Fallback: title + nearby data-src without strict order
+  for (const m of html.matchAll(
+    /href="(\/pornstars-profile\/[^"#?]+)"[^>]*title="([^"]+)"/gi
+  )) {
+    const href = m[1];
+    const name = decodeHtmlEntities(m[2]).trim();
+    if (!name) continue;
+    const profileUrl =
+      (href.startsWith("http") ? href : origin + href).replace(/\/+$/, "") +
+      "/";
+    if (seen.has(profileUrl)) continue;
+    seen.add(profileUrl);
+    // Find data-src in a window after this match
+    const idx = m.index ?? 0;
+    const windowHtml = html.slice(idx, idx + 800);
+    const thumb = windowHtml.match(
+      /data-src="(https?:\/\/[^"]*porn_star[^"]+)"/i
+    );
+    out.push({
+      name,
+      poster: thumb?.[1] || "",
+      profileUrl,
+      sourceSite: "porndoe.com",
+    });
+    if (out.length >= limit) break;
+  }
+
   return out;
 }
 
@@ -519,8 +636,10 @@ export async function scrapeModelsListing(
                 break;
               }
             }
-            if (hit && !existing.poster) {
+            if (hit) {
+              // Overwrite photo on re-crawl within the same import
               existing.poster = item.poster;
+              if (item.profileUrl) existing.profileUrl = item.profileUrl;
               break;
             }
           }
@@ -596,9 +715,14 @@ export async function scrapeModelsListing(
     log.push(`  Fetching models page ${page}: ${pageUrl}`);
     try {
       const html = await fetchHtml(pageUrl);
-      const batch = host.includes("fpo.xxx")
-        ? parseFpoModelsPage(html, 500)
-        : parseGenericModelsPage(html, listUrl, 500);
+      let batch: ScrapedModel[];
+      if (host.includes("porndoe.com")) {
+        batch = parsePorndoeModelsPage(html, pageUrl, 500);
+      } else if (host.includes("fpo.xxx")) {
+        batch = parseFpoModelsPage(html, 500);
+      } else {
+        batch = parseGenericModelsPage(html, listUrl, 500);
+      }
       if (!batch.length) {
         log.push(`  Page ${page}: no models found`);
         break;
@@ -608,7 +732,13 @@ export async function scrapeModelsListing(
         if (remember(item)) added += 1;
       }
       log.push(`  Page ${page}: found ${added} new model(s)`);
-      if (added === 0) break;
+      // Porndoe paginates deeply — keep going until empty; don't stop on 0 new
+      // if page had cards that were all duplicates mid-crawl
+      if (added === 0 && !host.includes("porndoe.com")) break;
+      if (added === 0 && host.includes("porndoe.com") && batch.length > 0) {
+        // All duplicates on this page — continue a couple pages then stop
+        // (handled by empty streak below via pages with only dups)
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.push(`  Page ${page} failed: ${msg}`);
@@ -628,6 +758,7 @@ export async function importModelsFromUrl(
 ): Promise<{
   added: number;
   skipped: number;
+  updated: number;
   scraped: number;
   total: number;
   synced: boolean;
@@ -643,6 +774,7 @@ export async function importModelsFromUrl(
     return {
       added: 0,
       skipped: 0,
+      updated: 0,
       scraped: 0,
       total: existing.length,
       synced: false,
@@ -652,12 +784,19 @@ export async function importModelsFromUrl(
     };
   }
   const now = new Date().toISOString();
-  const { merged, added, skipped } = mergeModelRecords(existing, scraped, now);
+  const { merged, added, skipped, updated } = mergeModelRecords(
+    existing,
+    scraped,
+    now
+  );
   const synced = await saveSiteModels(env, merged);
-  log.push(`Saved ${merged.length} model(s) to KV`);
+  log.push(
+    `Saved ${merged.length} model(s) to KV (+${added} new, ${updated} photos updated, ${skipped} unchanged)`
+  );
   return {
     added,
     skipped,
+    updated,
     scraped: scraped.length,
     total: merged.length,
     synced,
@@ -675,6 +814,7 @@ export async function importModelsFromHtml(
 ): Promise<{
   added: number;
   skipped: number;
+  updated: number;
   scraped: number;
   total: number;
   synced: boolean;
@@ -690,8 +830,19 @@ export async function importModelsFromHtml(
       "That HTML is still the Cloudflare challenge page. Wait until the real models list loads, then paste again."
     );
   }
+  if (
+    /age verification|will not be offering its service in your area|mandated age verification/i.test(
+      trimmed
+    )
+  ) {
+    throw new Error(
+      "Pasted HTML is an age-gate / geo block page, not the models list."
+    );
+  }
 
-  const normalized = normalizeModelsListUrl(listUrl || INDEXXX_GIRLCUM_MODELS);
+  const normalized = normalizeModelsListUrl(
+    listUrl || DEFAULT_MODELS_URL
+  );
   let host = "";
   try {
     host = new URL(normalized).hostname.toLowerCase();
@@ -700,7 +851,9 @@ export async function importModelsFromHtml(
   }
 
   let scraped: ScrapedModel[];
-  if (host.includes("indexxx.com")) {
+  if (host.includes("porndoe.com") || /actors-list-item|pornstars-profile/i.test(trimmed)) {
+    scraped = parsePorndoeModelsPage(trimmed, normalized, 5000);
+  } else if (host.includes("indexxx.com")) {
     scraped = parseIndexxxModelsPage(
       trimmed,
       normalized,
@@ -717,6 +870,7 @@ export async function importModelsFromHtml(
     return {
       added: 0,
       skipped: 0,
+      updated: 0,
       scraped: 0,
       total: existing.length,
       synced: false,
@@ -727,13 +881,20 @@ export async function importModelsFromHtml(
   }
 
   const now = new Date().toISOString();
-  const { merged, added, skipped } = mergeModelRecords(existing, scraped, now);
+  const { merged, added, skipped, updated } = mergeModelRecords(
+    existing,
+    scraped,
+    now
+  );
   const synced = await saveSiteModels(env, merged);
   log.push(`Parsed ${scraped.length} model(s) from pasted HTML`);
-  log.push(`Saved ${merged.length} model(s) to KV`);
+  log.push(
+    `Saved ${merged.length} model(s) to KV (+${added} new, ${updated} photos updated, ${skipped} unchanged)`
+  );
   return {
     added,
     skipped,
+    updated,
     scraped: scraped.length,
     total: merged.length,
     synced,
@@ -776,7 +937,11 @@ export async function upsertModelFromActorSearch(
   };
 
   const now = new Date().toISOString();
-  const { merged, added, skipped } = mergeModelRecords(existing, [item], now);
+  const { merged, added, skipped, updated } = mergeModelRecords(
+    existing,
+    [item],
+    now
+  );
   await saveSiteModels(env, merged);
   if (added) {
     log.push(
@@ -784,6 +949,8 @@ export async function upsertModelFromActorSearch(
         ? `Added model “${actor}” with thumbnail to site Models page.`
         : `Added model “${actor}” to site Models page (no thumbnail found).`
     );
+  } else if (updated) {
+    log.push(`Updated model “${actor}” photo on site Models page.`);
   } else if (skipped) {
     log.push(`Model “${actor}” already on site Models page.`);
   }

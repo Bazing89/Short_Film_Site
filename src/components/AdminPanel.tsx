@@ -51,8 +51,7 @@ const CATALOG_SOURCES = [
   { key: "playvids", label: "Playvids" },
 ] as const;
 
-const DEFAULT_MODELS_URL =
-  "https://www.indexxx.com/websites/10182/girlcum.com/models";
+const DEFAULT_MODELS_URL = "https://porndoe.com/pornstars";
 
 async function api<T>(
   path: string,
@@ -286,6 +285,7 @@ export function AdminPanel() {
     const { ok, data } = await api<{
       added?: number;
       skipped?: number;
+      updated?: number;
       scraped?: number;
       total?: number;
       error?: string;
@@ -304,8 +304,8 @@ export function AdminPanel() {
       appendLog(data.error || "Model import failed");
       return;
     }
-    appendLog(
-      `Models: +${data.added ?? 0} new, ${data.skipped ?? 0} skipped, total ${data.total ?? 0}`
+            appendLog(
+      `Models: +${data.added ?? 0} new, ${data.updated ?? 0} photos updated, ${data.skipped ?? 0} unchanged, total ${data.total ?? 0}`
     );
     setModelsCount(data.total ?? modelsCount);
   }
@@ -316,6 +316,7 @@ export function AdminPanel() {
     const { ok, data } = await api<{
       added?: number;
       skipped?: number;
+      updated?: number;
       total?: number;
       error?: string;
       log?: string[];
@@ -334,7 +335,7 @@ export function AdminPanel() {
       return;
     }
     appendLog(
-      `Models from HTML: +${data.added ?? 0} new, ${data.skipped ?? 0} skipped, total ${data.total ?? 0}`
+      `Models from HTML: +${data.added ?? 0} new, ${data.updated ?? 0} photos updated, ${data.skipped ?? 0} unchanged, total ${data.total ?? 0}`
     );
     setModelsCount(data.total ?? modelsCount);
     setModelsHtml("");
@@ -656,8 +657,19 @@ export function AdminPanel() {
           Import models
         </h3>
         <p className="text-sm text-cinema-muted">
-          Default source is the Indexxx GirlCum models list. If Cloudflare
-          blocks auto-fetch, open the page in your browser and paste HTML below.
+          Default source is{" "}
+          <a
+            href="https://porndoe.com/pornstars"
+            target="_blank"
+            rel="noreferrer"
+            className="text-cinema-accent hover:underline"
+          >
+            porndoe.com/pornstars
+          </a>
+          . Imports each name + profile photo. Re-importing{" "}
+          <strong className="text-cinema-text">overwrites photos</strong> on
+          matching models. If the site blocks the server (geo/age-gate), paste
+          page HTML below.
         </p>
         <div className="flex flex-wrap items-center gap-3">
           <input
@@ -705,8 +717,8 @@ export function AdminPanel() {
             Paste page HTML (recommended if Cloudflare blocks)
           </summary>
           <p className="mt-2 text-sm text-cinema-muted">
-            View Page Source on Indexxx → select all → paste. Also paste from
-            …/models2/ for the full name list.
+            View Page Source on the models list → select all → paste. Photos from
+            the paste overwrite matching models already on the site.
           </p>
           <textarea
             value={modelsHtml}
