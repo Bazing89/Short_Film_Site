@@ -1101,7 +1101,11 @@ function renderWatchPageHtml(film: Film, origin: string): string {
 <body>
   <header>
     <a class="brand" href="/">BangHeroes</a>
-    <a href="/films">All films</a>
+    <nav style="display:flex;gap:1rem;font-size:0.95rem">
+      <a href="/films">Films</a>
+      <a href="/videos">Videos</a>
+      <a href="/models">Models</a>
+    </nav>
   </header>
   <main>
     <article>
@@ -1136,33 +1140,27 @@ function renderSitemapXml(films: Film[], origin: string): string {
     })
     .join("\n");
 
+  const staticPages = [
+    { path: "/", changefreq: "daily", priority: "1.0" },
+    { path: "/films", changefreq: "daily", priority: "0.9" },
+    { path: "/videos", changefreq: "daily", priority: "0.9" },
+    { path: "/models", changefreq: "daily", priority: "0.8" },
+    { path: "/bop-models", changefreq: "daily", priority: "0.8" },
+    { path: "/about", changefreq: "monthly", priority: "0.5" },
+    { path: "/contact", changefreq: "monthly", priority: "0.5" },
+  ]
+    .map(
+      (page) => `  <url>
+    <loc>${escapeHtml(origin)}${page.path === "/" ? "/" : page.path}</loc>
+    <changefreq>${page.changefreq}</changefreq>
+    <priority>${page.priority}</priority>
+  </url>`
+    )
+    .join("\n");
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>${escapeHtml(origin)}/</loc>
-    <changefreq>daily</changefreq>
-    <priority>1.0</priority>
-  </url>
-  <url>
-    <loc>${escapeHtml(origin)}/films</loc>
-    <changefreq>daily</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>${escapeHtml(origin)}/videos</loc>
-    <changefreq>daily</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>${escapeHtml(origin)}/models</loc>
-    <changefreq>daily</changefreq>
-    <priority>0.8</priority>
-  </url>
-  <url>
-    <loc>${escapeHtml(origin)}/bop-models</loc>
-    <changefreq>daily</changefreq>
-    <priority>0.8</priority>
-  </url>
+${staticPages}
 ${urls}
 </urlset>`;
 }

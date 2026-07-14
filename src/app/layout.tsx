@@ -4,6 +4,9 @@ import { Footer } from "@/components/Footer";
 import "./globals.css";
 
 export const metadata: Metadata = {
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL || "https://bangheroes.com"
+  ),
   title: {
     default: "BangHeroes",
     template: "%s | BangHeroes",
