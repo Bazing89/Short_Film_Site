@@ -66,6 +66,14 @@ SEARCH_UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# GirlCum's own /models page is JS/login-gated — Indexxx mirrors the roster publicly.
+INDEXXX_GIRLCUM_MODELS = (
+    "https://www.indexxx.com/websites/10182/girlcum.com/models"
+)
+INDEXXX_GIRLCUM_MODELS2 = (
+    "https://www.indexxx.com/websites/10182/girlcum.com/models2/"
+)
+
 SEARCH_SOURCES = {
     "xvideos": {
         "label": "XVideos",
@@ -186,10 +194,88 @@ def prune_queue_meta(urls: list[str]) -> dict[str, dict]:
     return keep
 
 
-def _fetch_search_html(url: str) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": SEARCH_UA})
-    with urllib.request.urlopen(req, timeout=30) as res:
+def _is_cloudflare_challenge(html: str) -> bool:
+    low = (html or "").lower()
+    return (
+        "just a moment" in low
+        or "cf-challenge" in low
+        or "cdn-cgi/challenge-platform" in low
+        or "performing security verification" in low
+    )
+
+
+def _fetch_html_urllib(url: str, timeout: int = 30) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": SEARCH_UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as res:
         return res.read().decode("utf-8", "replace")
+
+
+def _fetch_html_curl_cffi(url: str, timeout: int = 45) -> str:
+    """Browser-impersonated fetch (helps with Cloudflare-protected pages)."""
+    from curl_cffi import requests as cf_requests  # type: ignore
+
+    response = cf_requests.get(
+        url,
+        impersonate="chrome124",
+        timeout=timeout,
+        headers={"Accept-Language": "en-US,en;q=0.9"},
+        allow_redirects=True,
+    )
+    # Don't raise on 403 — Cloudflare challenge pages still return HTML.
+    return response.text
+
+
+def _fetch_search_html(url: str) -> str:
+    host = urllib.parse.urlsplit(url).netloc.lower()
+    prefer_browser = "indexxx.com" in host
+
+    if prefer_browser:
+        try:
+            html = _fetch_html_curl_cffi(url)
+            if not _is_cloudflare_challenge(html):
+                return html
+        except ImportError as exc:
+            raise RuntimeError(
+                "Indexxx is behind Cloudflare. Install curl_cffi then retry:\n"
+                "  pip3 install curl_cffi"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            try:
+                html = _fetch_html_urllib(url)
+            except Exception:
+                raise RuntimeError(f"Failed to fetch Indexxx page: {exc}") from exc
+            if _is_cloudflare_challenge(html):
+                raise RuntimeError(
+                    "Indexxx Cloudflare challenge blocked the automated request.\n"
+                    "Open the models page in your browser, then in the UI use "
+                    "“Paste page HTML” (View Source → select all → paste)."
+                ) from exc
+            return html
+        raise RuntimeError(
+            "Indexxx Cloudflare challenge blocked the automated request.\n"
+            "Open the models page in your browser, then in the UI use "
+            "“Paste page HTML” (View Source → select all → paste)."
+        )
+
+    html = _fetch_html_urllib(url)
+    if _is_cloudflare_challenge(html):
+        try:
+            html = _fetch_html_curl_cffi(url)
+        except ImportError as exc:
+            raise RuntimeError(
+                "This site is behind Cloudflare. Install curl_cffi then retry:\n"
+                "  pip3 install curl_cffi"
+            ) from exc
+        if _is_cloudflare_challenge(html):
+            raise RuntimeError("Cloudflare challenge blocked the request.")
+    return html
 
 
 def _slug_title(path: str) -> str:
@@ -1263,6 +1349,143 @@ def _parse_fpo_models_page(html: str, limit: int) -> list[dict]:
     return out
 
 
+def _indexxx_model_name_from_path(path: str) -> str:
+    slug = urllib.parse.unquote_plus(path.rstrip("/").split("/")[-1])
+    slug = re.sub(r"[+_]+", " ", slug)
+    slug = re.sub(r"\s{2,}", " ", slug).strip()
+    return slug
+
+
+def _parse_indexxx_models_page(
+    html: str, base_url: str, limit: int, source_site: str = "girlcum.com"
+) -> list[dict]:
+    """Parse Indexxx website model grids (/models) and text lists (/models2)."""
+    parsed = urllib.parse.urlsplit(base_url)
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+    thumb_map: dict[str, str] = {}
+    for href, thumb in re.findall(
+        r'href="([^"]*/models/[^"#?]+)"[^>]*>.{0,1200}?<img[^>]+(?:src|data-src)="([^"]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        key = href if href.startswith("http") else origin + href
+        key = key.split("?")[0].split("#")[0].rstrip("/")
+        if "/models/" not in key.lower():
+            continue
+        thumb_map.setdefault(key, html_lib.unescape(thumb.strip()))
+
+    # Image-first cards: <img ...> wrapped by /models/ link
+    for thumb, href in re.findall(
+        r'<img[^>]+(?:src|data-src)="([^"]+)"[^>]*>.{0,400}?href="([^"]*/models/[^"#?]+)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        key = href if href.startswith("http") else origin + href
+        key = key.split("?")[0].split("#")[0].rstrip("/")
+        thumb_map.setdefault(key, html_lib.unescape(thumb.strip()))
+
+    pairs: list[tuple[str, str]] = []
+    for href, label in re.findall(
+        r'href="([^"]*/models/[^"#?]+)"[^>]*>([^<]{2,100})<',
+        html,
+        flags=re.I,
+    ):
+        pairs.append((href, html_lib.unescape(label).strip()))
+    for href in re.findall(r'href="([^"]*/models/[^"#?]+)"', html, flags=re.I):
+        pairs.append((href, ""))
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    skip_slugs = {
+        "models",
+        "models2",
+        "top",
+        "new",
+        "popular",
+        "search",
+        "websites",
+        "sets",
+    }
+
+    for href, label in pairs:
+        profile_url = href if href.startswith("http") else origin + href
+        profile_url = profile_url.split("?")[0].split("#")[0]
+        lower = profile_url.lower()
+        if "/websites/" in lower:
+            continue
+        if not re.search(r"/models/[^/]+/?$", lower):
+            continue
+        slug = profile_url.rstrip("/").split("/")[-1]
+        if slug.lower() in skip_slugs or slug.isdigit():
+            continue
+        profile_url = profile_url.rstrip("/") + "/"
+        if profile_url in seen:
+            continue
+        seen.add(profile_url)
+
+        name = re.sub(r"\s*\(\d+\)\s*$", "", label).strip() if label else ""
+        if not name:
+            name = _indexxx_model_name_from_path(profile_url)
+        if not name or name.lower() in skip_slugs:
+            continue
+
+        out.append(
+            {
+                "name": name,
+                "poster": thumb_map.get(profile_url.rstrip("/"), ""),
+                "profileUrl": profile_url,
+                "sourceSite": source_site,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _indexxx_source_site_from_url(list_url: str) -> str:
+    match = re.search(r"/websites/\d+/([^/]+)/", list_url, flags=re.I)
+    if match:
+        return match.group(1).lower()
+    return "indexxx.com"
+
+
+def _normalize_models_list_url(list_url: str) -> str:
+    """Map GirlCum's gated /models page to the public Indexxx mirror."""
+    raw = (list_url or "").strip()
+    if not raw:
+        return raw
+    parsed = urllib.parse.urlsplit(raw)
+    host = parsed.netloc.lower().replace("www.", "")
+    path = parsed.path.lower().rstrip("/")
+    if host.endswith("girlcum.com") and (
+        path.endswith("/models") or path.endswith("/model") or path == ""
+    ):
+        return INDEXXX_GIRLCUM_MODELS
+    return raw
+
+
+def _indexxx_companion_list_url(list_url: str) -> str | None:
+    """Indexxx /models2 is the full text roster; /models has photo cards."""
+    parsed = urllib.parse.urlsplit(list_url)
+    if "indexxx.com" not in parsed.netloc.lower():
+        return None
+    path = parsed.path.rstrip("/")
+    if re.search(r"/models2/?$", path, flags=re.I):
+        return None
+    if re.search(r"/models/?$", path, flags=re.I):
+        return urllib.parse.urlunsplit(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                path.rstrip("/") + "2/",
+                "",
+                "",
+            )
+        )
+    return None
+
+
 def _parse_generic_models_page(html: str, base_url: str, limit: int) -> list[dict]:
     parsed = urllib.parse.urlsplit(base_url)
     origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
@@ -1413,7 +1636,7 @@ def _fetch_json_models_api(api_url: str, log: LogFn = print) -> list[dict]:
     return out
 
 
-def _models_listing_page_url(list_url: str, page: int) -> str:
+def _models_listing_page_url(list_url: str, page: int) -> str | None:
     parsed = urllib.parse.urlsplit(list_url.strip())
     origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
     path = parsed.path.rstrip("/")
@@ -1421,6 +1644,26 @@ def _models_listing_page_url(list_url: str, page: int) -> str:
 
     if page <= 1:
         return list_url.strip()
+
+    if "indexxx.com" in host:
+        # models2 is a single full roster page
+        if re.search(r"/models2/?$", path, flags=re.I):
+            return None
+        # /websites/.../models → /websites/.../models/2/
+        if re.search(r"/models/?$", path, flags=re.I):
+            return f"{origin}{path}/{page}/"
+        query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        query = [(k, v) for k, v in query if k.lower() != "page"]
+        query.append(("page", str(page)))
+        return urllib.parse.urlunsplit(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                urllib.parse.urlencode(query),
+                "",
+            )
+        )
 
     if "fpo.xxx" in host:
         return f"{origin}/models/{page}/"
@@ -1443,7 +1686,7 @@ def scrape_models_listing(
     stop_event: threading.Event | None = None,
 ) -> list[dict]:
     """Scrape model names/posters from a site models index URL."""
-    list_url = (list_url or "").strip()
+    list_url = _normalize_models_list_url(list_url)
     if not list_url:
         raise ValueError("Models listing URL is required")
     parsed = urllib.parse.urlsplit(list_url)
@@ -1458,36 +1701,68 @@ def scrape_models_listing(
     def remember_item(item: dict) -> bool:
         keys = _model_item_dedupe_keys(item)
         if keys & seen_keys:
+            # Prefer keeping/updating poster if a later page has one
+            if item.get("poster"):
+                for existing in found:
+                    if _model_item_dedupe_keys(existing) & keys:
+                        if not existing.get("poster"):
+                            existing["poster"] = item["poster"]
+                        break
             return False
         seen_keys.update(keys)
         found.append(item)
         return True
 
-    if "girlcum.com" in host:
-        api_origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
-        for page in range(1, max_pages + 1):
-            if stop_event is not None and stop_event.is_set():
-                break
-            api_url = f"{api_origin}/api/members/models?page={page}"
-            log(f"  [GirlCum] trying API page {page}…")
-            batch = _fetch_json_models_api(api_url, log=log)
-            if not batch:
-                if page == 1:
-                    log(
-                        "  GirlCum /models is JS-rendered and the API needs a member login. "
-                        "Use fpo.xxx/models/ or another public HTML listing."
-                    )
-                break
-            for item in batch:
-                remember_item(item)
-        if found:
-            return found
+    # Indexxx: pull photo cards (/models) then the full text roster (/models2)
+    if "indexxx.com" in host:
+        source_site = _indexxx_source_site_from_url(list_url)
+        urls_to_crawl: list[str] = [list_url]
+        companion = _indexxx_companion_list_url(list_url)
+        if companion and companion not in urls_to_crawl:
+            urls_to_crawl.append(companion)
+            log("  Also crawling Indexxx models2 roster for complete names…")
+
+        for crawl_url in urls_to_crawl:
+            crawl_host_path = urllib.parse.urlsplit(crawl_url).path.lower()
+            is_models2 = "/models2" in crawl_host_path
+            pages = 1 if is_models2 else max_pages
+            for page in range(1, pages + 1):
+                if stop_event is not None and stop_event.is_set():
+                    log("Model import stopped by user.")
+                    return found
+                page_url = _models_listing_page_url(crawl_url, page)
+                if not page_url:
+                    break
+                log(f"  Fetching Indexxx page {page}: {page_url}")
+                try:
+                    html = _fetch_search_html(page_url)
+                except Exception as exc:  # noqa: BLE001
+                    log(f"  Page {page} failed: {exc}")
+                    if page == 1 and crawl_url == list_url:
+                        raise
+                    break
+                batch = _parse_indexxx_models_page(
+                    html, page_url, limit=2000, source_site=source_site
+                )
+                if not batch:
+                    log(f"  Page {page}: no models found")
+                    break
+                added = 0
+                for item in batch:
+                    if remember_item(item):
+                        added += 1
+                log(f"  Page {page}: found {added} new model(s)")
+                if added == 0:
+                    break
+        return found
 
     for page in range(1, max_pages + 1):
         if stop_event is not None and stop_event.is_set():
             log("Model import stopped by user.")
             break
         page_url = _models_listing_page_url(list_url, page)
+        if not page_url:
+            break
         log(f"  Fetching models page {page}: {page_url}")
         try:
             html = _fetch_search_html(page_url)
@@ -1504,11 +1779,6 @@ def scrape_models_listing(
 
         if not batch:
             log(f"  Page {page}: no models found")
-            if page == 1 and "girlcum.com" in host:
-                log(
-                    "  GirlCum renders models in the browser after login — "
-                    "no models in static HTML. Try fpo.xxx/models/ instead."
-                )
             break
 
         added = 0
@@ -1529,6 +1799,7 @@ def import_models_from_url(
     stop_event: threading.Event | None = None,
 ) -> dict:
     """Import models from a listing URL into models.json (+ optional KV sync)."""
+    list_url = _normalize_models_list_url(list_url)
     scraped = scrape_models_listing(
         list_url,
         max_pages=max_pages,
@@ -1536,7 +1807,13 @@ def import_models_from_url(
         stop_event=stop_event,
     )
     if not scraped:
-        return {"added": 0, "skipped": 0, "total": len(load_site_models()), "scraped": 0}
+        return {
+            "added": 0,
+            "skipped": 0,
+            "total": len(load_site_models()),
+            "scraped": 0,
+            "sourceUrl": list_url,
+        }
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     merged, added, skipped = _merge_model_records(load_site_models(), scraped, now)
@@ -1556,6 +1833,68 @@ def import_models_from_url(
         "total": len(merged),
         "synced": bool(sync.get("ok")),
         "sync": sync,
+        "sourceUrl": list_url,
+    }
+
+
+def import_models_from_html(
+    html: str,
+    list_url: str = "",
+    log: LogFn = print,
+) -> dict:
+    """Import models from pasted Indexxx (or other) listing HTML."""
+    html = (html or "").strip()
+    if not html:
+        raise ValueError("Paste the models page HTML first")
+    if _is_cloudflare_challenge(html):
+        raise ValueError(
+            "That HTML is still the Cloudflare challenge page. "
+            "Wait until the real models list loads, then paste again."
+        )
+
+    list_url = _normalize_models_list_url(
+        list_url or INDEXXX_GIRLCUM_MODELS
+    )
+    host = urllib.parse.urlsplit(list_url).netloc.lower()
+    if "indexxx.com" in host:
+        source_site = _indexxx_source_site_from_url(list_url)
+        scraped = _parse_indexxx_models_page(
+            html, list_url, limit=5000, source_site=source_site
+        )
+    elif "fpo.xxx" in host:
+        scraped = _parse_fpo_models_page(html, limit=5000)
+    else:
+        scraped = _parse_generic_models_page(html, list_url, limit=5000)
+
+    if not scraped:
+        return {
+            "added": 0,
+            "skipped": 0,
+            "total": len(load_site_models()),
+            "scraped": 0,
+            "sourceUrl": list_url,
+        }
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    merged, added, skipped = _merge_model_records(load_site_models(), scraped, now)
+    save_site_models(merged)
+    log(f"Parsed {len(scraped)} model(s) from pasted HTML")
+    log(f"Saved {len(merged)} model(s) to {MODELS_PUBLIC.name}")
+
+    sync = sync_site_models_to_live_site(merged, log=log)
+    if sync.get("ok"):
+        log("  Models live on site (KV).")
+    elif sync.get("error"):
+        log(f"  KV sync skipped/failed: {sync.get('error')}")
+
+    return {
+        "added": added,
+        "skipped": skipped,
+        "scraped": len(scraped),
+        "total": len(merged),
+        "synced": bool(sync.get("ok")),
+        "sync": sync,
+        "sourceUrl": list_url,
     }
 
 

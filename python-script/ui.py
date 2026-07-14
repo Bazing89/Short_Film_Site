@@ -312,6 +312,26 @@ def _run_model_import(list_url: str, max_pages: int) -> None:
             _model_import_worker = None
 
 
+def _run_model_import_html(list_url: str, html: str) -> None:
+    global _importing_models, _model_import_worker, _last_model_import
+    try:
+        result = bunny.import_models_from_html(
+            html,
+            list_url=list_url,
+            log=_append_log,
+        )
+        with _state_lock:
+            _last_model_import = result
+    except Exception as exc:  # noqa: BLE001
+        _append_log(f"Model HTML import crashed: {exc}")
+        with _state_lock:
+            _last_model_import = {"ok": False, "error": str(exc)}
+    finally:
+        with _state_lock:
+            _importing_models = False
+            _model_import_worker = None
+
+
 def _start_model_import(list_url: str, max_pages: int) -> tuple[bool, str]:
     global _importing_models, _model_import_worker, _last_model_import
     list_url = (list_url or "").strip()
@@ -339,6 +359,33 @@ def _start_model_import(list_url: str, max_pages: int) -> tuple[bool, str]:
         )
         _model_import_worker.start()
     return True, "Model import started"
+
+
+def _start_model_import_html(list_url: str, html: str) -> tuple[bool, str]:
+    global _importing_models, _model_import_worker, _last_model_import
+    html = (html or "").strip()
+    if not html:
+        return False, "Paste models page HTML first"
+    with _state_lock:
+        if _importing_models:
+            return False, "Model import already running"
+        if _importing:
+            return False, "Cannot import models while catalog import is running"
+        if _running:
+            return False, "Cannot import models while downloads are running"
+        if _searching:
+            return False, "Cannot import models while search is running"
+        _logs.clear()
+        _last_model_import = None
+        _importing_models = True
+        _model_import_stop_event.clear()
+        _model_import_worker = threading.Thread(
+            target=_run_model_import_html,
+            args=(list_url, html),
+            daemon=True,
+        )
+        _model_import_worker.start()
+    return True, "Model HTML import started"
 
 
 def _queue_search_selection(urls: list[str]) -> tuple[int, str]:
@@ -721,14 +768,22 @@ PAGE = r"""<!DOCTYPE html>
 
     <section class="panel" style="margin-bottom: 1.1rem;">
       <h2>Import models</h2>
-      <p class="hint">Paste a site <strong>/models</strong> listing URL (e.g. <code>fpo.xxx/models/</code> or <code>girlcum.com/models</code>). Imports into the site <strong>Models</strong> page. Public HTML listings work best; JS-only sites may return 0 models.</p>
+      <p class="hint">Default source is the <strong>Indexxx GirlCum models list</strong>. GirlCum’s own /models page needs login, so we use Indexxx instead. If Cloudflare blocks the auto-fetch, open the Indexxx page in your browser and paste the HTML below.</p>
       <div class="row" style="margin-top: 0.65rem;">
-        <input class="actor-input" id="modelsUrl" type="url" placeholder="https://girlcum.com/models" />
+        <input class="actor-input" id="modelsUrl" type="url" value="https://www.indexxx.com/websites/10182/girlcum.com/models" placeholder="https://www.indexxx.com/websites/10182/girlcum.com/models" />
         <label for="modelsPages" style="font-size: 0.85rem; color: var(--muted); white-space: nowrap;">Max pages</label>
-        <input id="modelsPages" type="number" min="1" max="200" value="10" title="Pages to crawl (1–200)" style="width: 5rem;" />
+        <input id="modelsPages" type="number" min="1" max="200" value="20" title="Pages to crawl (1–200)" style="width: 5rem;" />
         <button class="btn-primary" id="importModelsBtn" type="button">Import models</button>
         <button class="btn-danger" id="importModelsStopBtn" type="button" disabled>Stop</button>
       </div>
+      <details class="paste" style="margin-top: 0.75rem;">
+        <summary>Paste page HTML (recommended if Cloudflare blocks)</summary>
+        <p class="hint" style="margin-top: 0.5rem;">1) Open the Indexxx models URL in Chrome/Safari → wait for the list to load → right-click → View Page Source → Select All → Copy. 2) Paste here and click Import pasted HTML. For the full name list, also paste from <code>.../models2/</code>.</p>
+        <textarea id="modelsHtml" placeholder="Paste Indexxx models page HTML here" style="min-height: 140px;"></textarea>
+        <div class="actions">
+          <button class="btn-secondary" id="importModelsHtmlBtn" type="button">Import pasted HTML</button>
+        </div>
+      </details>
       <p class="hint" style="margin-top: 0.65rem;">Models on site: <strong id="modelsCount">0</strong></p>
     </section>
 
@@ -998,9 +1053,11 @@ PAGE = r"""<!DOCTYPE html>
       });
       $("importPages").disabled = !!state.importing;
       $("importModelsBtn").disabled = busy;
+      $("importModelsHtmlBtn").disabled = busy;
       $("importModelsStopBtn").disabled = !state.importingModels;
       $("modelsUrl").disabled = !!state.importingModels;
       $("modelsPages").disabled = !!state.importingModels;
+      $("modelsHtml").disabled = !!state.importingModels;
     }
 
     function render(state) {
@@ -1178,6 +1235,27 @@ PAGE = r"""<!DOCTYPE html>
       }
     });
 
+    $("importModelsHtmlBtn").addEventListener("click", async () => {
+      const html = $("modelsHtml").value.trim();
+      if (!html) {
+        toast("Paste models page HTML first");
+        return;
+      }
+      try {
+        await api("/api/import-models-html", {
+          method: "POST",
+          body: JSON.stringify({
+            url: $("modelsUrl").value.trim(),
+            html,
+          }),
+        });
+        toast("Importing from pasted HTML…");
+        await refresh();
+      } catch (err) {
+        toast(err.message || "Model HTML import failed");
+      }
+    });
+
     $("importModelsStopBtn").addEventListener("click", async () => {
       await api("/api/import-models-stop", { method: "POST", body: "{}" });
       toast("Stopping model import…");
@@ -1215,6 +1293,9 @@ class Handler(BaseHTTPRequestHandler):
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
+            return {}
+        # Indexxx model pages can be large when pasted as HTML
+        if length > 25 * 1024 * 1024:
             return {}
         raw = self.rfile.read(length)
         try:
@@ -1288,6 +1369,16 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 max_pages = 10
             ok, message = _start_model_import(list_url, max_pages)
+            self._send(
+                200 if ok else 400,
+                {"ok": ok, "message": message, **({"error": message} if not ok else {})},
+            )
+            return
+
+        if path == "/api/import-models-html":
+            list_url = str(data.get("url") or "").strip()
+            html = str(data.get("html") or "")
+            ok, message = _start_model_import_html(list_url, html)
             self._send(
                 200 if ok else 400,
                 {"ok": ok, "message": message, **({"error": message} if not ok else {})},

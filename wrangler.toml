@@ -23,3 +23,7 @@ BUNNY_COLLECTION_ID = "98f0b8d8-336d-4ab9-9c2c-513c29815305"
 [[kv_namespaces]]
 binding = "OUTBOUND"
 id = "0c0ad6ce804246e9b95d954674860e36"
+
+# Auto-scrape FPO/Playvids newest → outbound KV (runs in Cloudflare, computer can be off)
+[triggers]
+crons = ["0 */6 * * *"]

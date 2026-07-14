@@ -9,6 +9,12 @@
  */
 
 import { BUILD_SECRETS } from "./generated-secrets";
+import {
+  loadSyncStatus,
+  runCatalogSync,
+  saveSyncStatus,
+  type SyncResult,
+} from "./catalog-sync";
 
 export interface Env {
   ASSETS: Fetcher;
@@ -848,7 +854,129 @@ async function handleAdminApi(
     });
   }
 
+  if (pathname === "/api/admin/sync" && request.method === "GET") {
+    const status = await loadSyncStatus(env);
+    const records = await loadOutboundFilms(request, env);
+    return jsonFresh({
+      ok: true,
+      kv: Boolean(env.OUTBOUND),
+      catalogCount: records.length,
+      ...status,
+    });
+  }
+
+  if (pathname === "/api/admin/sync" && request.method === "POST") {
+    if (!env.OUTBOUND) {
+      return json(
+        {
+          ok: false,
+          error:
+            "KV binding OUTBOUND is missing. Add it in Cloudflare Dashboard → Worker → Settings → Bindings.",
+        },
+        503
+      );
+    }
+
+    const body = (await request.json().catch(() => ({}))) as {
+      action?: string;
+      enabled?: boolean;
+      sites?: string[];
+      maxPages?: number;
+      untilCaughtUp?: boolean;
+    };
+
+    if (body.action === "set-enabled") {
+      const status = await loadSyncStatus(env);
+      status.enabled = body.enabled !== false;
+      await saveSyncStatus(env, status);
+      return jsonFresh({ ok: true, enabled: status.enabled, ...status });
+    }
+
+    const existing = await loadOutboundFilms(request, env);
+    const { result, films } = await runCatalogSync(env, {
+      sites: body.sites,
+      maxPages: body.maxPages ?? 5,
+      untilCaughtUp: body.untilCaughtUp !== false,
+      existing,
+      trigger: "admin",
+    });
+
+    const prev = await loadSyncStatus(env);
+    await saveSyncStatus(env, {
+      enabled: prev.enabled,
+      lastRun: result,
+    });
+
+    return jsonFresh({
+      ok: result.ok,
+      ...result,
+      catalogCount: films.length,
+      persisted: true,
+    });
+  }
+
   return json({ ok: false, error: "Not found" }, 404);
+}
+
+async function runScheduledCatalogSync(env: Env): Promise<SyncResult> {
+  const status = await loadSyncStatus(env);
+  if (!status.enabled) {
+    const skipped: SyncResult = {
+      ok: true,
+      added: 0,
+      skipped: 0,
+      pages: 0,
+      sites: [],
+      count: 0,
+      log: ["Auto-sync is disabled in admin"],
+      finishedAt: new Date().toISOString(),
+      trigger: "cron",
+    };
+    await saveSyncStatus(env, { enabled: false, lastRun: skipped });
+    return skipped;
+  }
+
+  if (!env.OUTBOUND) {
+    const failed: SyncResult = {
+      ok: false,
+      added: 0,
+      skipped: 0,
+      pages: 0,
+      sites: [],
+      count: 0,
+      error: "OUTBOUND KV missing",
+      log: ["OUTBOUND KV missing"],
+      finishedAt: new Date().toISOString(),
+      trigger: "cron",
+    };
+    return failed;
+  }
+
+  // Cron has no browser request — read catalog from KV only
+  let existing: OutboundRecord[] = [];
+  try {
+    const raw = await env.OUTBOUND.get(OUTBOUND_KV_KEY);
+    if (raw) {
+      const data = JSON.parse(raw) as unknown;
+      if (Array.isArray(data)) existing = data as OutboundRecord[];
+    }
+  } catch {
+    existing = [];
+  }
+
+  const { result } = await runCatalogSync(env, {
+    sites: ["fpo", "playvids"],
+    maxPages: 5,
+    untilCaughtUp: true,
+    existing,
+    trigger: "cron",
+  });
+
+  await saveSyncStatus(env, {
+    enabled: true,
+    lastRun: result,
+  });
+  return result;
 }
 
 async function handlePosterProxy(request: Request): Promise<Response> {
@@ -1176,6 +1304,20 @@ Sitemap: ${origin}/sitemap.xml
 }
 
 export default {
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext
+  ): Promise<void> {
+    ctx.waitUntil(
+      runScheduledCatalogSync(env).then((result) => {
+        console.log(
+          `Catalog sync (${result.trigger}): ok=${result.ok} added=${result.added} skipped=${result.skipped} pages=${result.pages}`
+        );
+      })
+    );
+  },
+
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
       const url = new URL(request.url);

@@ -18,10 +18,16 @@ Collection ID defaults to `98f0b8d8-336d-4ab9-9c2c-513c29815305` (override with 
 
 ```bash
 cd "/path/to/Short_Film_Site"
-python3 python-script/ui.py
+python3 -m venv python-script/.venv
+python-script/.venv/bin/pip install -r python-script/requirements.txt
+python-script/.venv/bin/python python-script/ui.py
 ```
 
 Opens http://127.0.0.1:8765
+
+(You can still run `python3 python-script/ui.py` without the venv; Indexxx auto-fetch may fail behind Cloudflare — use **Paste page HTML** in that case.)
+
+**Cloud auto-scrape (computer off):** Deploy the site, then use `/admin` (password `7777`) → **Sync new now** / **Auto-scrape On**. Cloudflare Cron pulls FPO/Playvids every 6 hours into outbound KV (links only — not yt-dlp downloads).
 
 1. Enter an **actor name** and search XVideos / XNXX / Pornhub / MyFPO (fpo.xxx) / Eporner / Playvids — the actor is auto-pushed to the site **Models** page when videos are found  
 2. Select videos from the results list  
@@ -31,7 +37,9 @@ Opens http://127.0.0.1:8765
 4. Or use **Sync new** / **Import all** from FPO / Playvids:
    - **Sync new** — pulls only the newest pages and stops when everything is already on your site (use this daily)
    - **Import all** — deep crawl for a one-time backfill (set max pages high)
-5. **Import models** — paste a `/models` listing URL (e.g. `https://www.fpo.xxx/models/`) to import performer profiles into `models.json` for the site **Models** page. Re-imports skip duplicates by profile URL, slug, and name.
+5. **Import models** — defaults to the Indexxx GirlCum roster (`https://www.indexxx.com/websites/10182/girlcum.com/models`). Pasting `girlcum.com/models` auto-rewrites to that Indexxx URL. Re-imports skip duplicates by profile URL, slug, and name.
+   - Optional: `python3 -m venv python-script/.venv && python-script/.venv/bin/pip install -r python-script/requirements.txt`
+   - Indexxx is Cloudflare-protected. If **Import models** fails, open the Indexxx page in your browser, View Page Source, and use **Paste page HTML** in the UI (also paste `.../models2/` for the full name list).
 6. For **live updates without rebuild**, bind Cloudflare KV as `OUTBOUND` (see below) and set `SITE_URL` in `.dev.vars`
 
 ### Hands-off auto sync (recommended)

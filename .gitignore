@@ -54,4 +54,6 @@ cloudflare-token.txt
 /python-script/queue_meta.json
 __pycache__/
 *.pyc
+/python-script/.venv/
 
+/python-script/.models-sync.json
