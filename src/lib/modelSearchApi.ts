@@ -39,7 +39,8 @@ export { SEARCH_SOURCES };
 
 export async function searchModelOnline(
   model: string,
-  sources?: string[]
+  sources?: string[],
+  limit = 20
 ): Promise<ModelSearchResponse> {
   const res = await fetch("/api/model-search", {
     method: "POST",
@@ -47,6 +48,7 @@ export async function searchModelOnline(
     body: JSON.stringify({
       model: model.trim(),
       sources: sources?.length ? sources : SEARCH_SOURCES,
+      limit,
     }),
   });
   const data = (await res.json().catch(() => ({}))) as ModelSearchResponse;

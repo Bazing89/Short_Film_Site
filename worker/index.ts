@@ -526,10 +526,12 @@ async function handlePublicModelSearch(
   }
 
   const limitPerSource = Number(body.limit);
-  const searchLimit =
-    Number.isFinite(limitPerSource) && limitPerSource > 0
+  const searchLimit = Math.min(
+    24,
+    Math.max(1, Number.isFinite(limitPerSource) && limitPerSource > 0
       ? limitPerSource
-      : 0;
+      : 20)
+  );
   try {
     const { results, log } = await searchActorVideos(
       model,
@@ -1151,10 +1153,12 @@ async function handleAdminApi(
     }
     try {
       const limitPerSource = Number(body.limit);
-      const searchLimit =
-        Number.isFinite(limitPerSource) && limitPerSource > 0
+      const searchLimit = Math.min(
+        100,
+        Math.max(1, Number.isFinite(limitPerSource) && limitPerSource > 0
           ? limitPerSource
-          : 0;
+          : 20)
+      );
       const { results, log } = await searchActorVideos(
         actor,
         body.sources,

@@ -32,6 +32,8 @@ const SOURCE_LABELS: Record<string, string> = {
   playvids: "Playvids",
 };
 
+const LIBRARY_PREVIEW_LIMIT = 8;
+
 function normalizeVideoUrl(url: string): string {
   const raw = (url || "").trim();
   if (!raw) return "";
@@ -90,7 +92,7 @@ export function ModelSearchHome({
         ]);
         if (!cancelled) {
           const fromFilms = deriveModels(films);
-          const merged = mergeImportedAndFilmModels(imported, fromFilms, films);
+          const merged = mergeImportedAndFilmModels(imported, fromFilms);
           setPopularModels(merged.slice(0, 12));
         }
       } catch {
@@ -393,10 +395,21 @@ export function ModelSearchHome({
               </Link>
             </div>
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-              {libraryFilms.map((film) => (
+              {libraryFilms.slice(0, LIBRARY_PREVIEW_LIMIT).map((film) => (
                 <VideoCard key={film.slug} film={film} />
               ))}
             </div>
+            {libraryFilms.length > LIBRARY_PREVIEW_LIMIT ? (
+              <p className="mt-4 text-center text-sm text-cinema-muted">
+                Showing {LIBRARY_PREVIEW_LIMIT} of {libraryFilms.length} matches.{" "}
+                <Link
+                  href={modelDetailPath(activeModel)}
+                  className="text-cinema-accent hover:underline"
+                >
+                  View all →
+                </Link>
+              </p>
+            ) : null}
           </section>
         ) : null}
 

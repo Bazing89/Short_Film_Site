@@ -36,7 +36,7 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
         ]);
         if (!cancelled) {
           const fromFilms = deriveModels(films, site ? { site } : undefined);
-          setModels(mergeImportedAndFilmModels(imported, fromFilms, films));
+          setModels(mergeImportedAndFilmModels(imported, fromFilms));
           setVisibleCount(MODELS_PAGE_SIZE);
           setError("");
         }
