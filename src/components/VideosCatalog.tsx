@@ -50,7 +50,7 @@ export function VideosCatalog() {
     <>
       <PageHeader
         title="Videos"
-        subtitle="Browse the full catalog — hosted streams and outbound links with thumbnails."
+        subtitle="Search the full library — videos imported by users and the community."
       />
 
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
@@ -72,8 +72,8 @@ export function VideosCatalog() {
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search videos..."
-            className="w-full rounded-lg border border-cinema-border bg-cinema-card py-3 pl-12 pr-4 text-sm text-cinema-text placeholder:text-cinema-muted focus:border-cinema-accent focus:outline-none focus:ring-1 focus:ring-cinema-accent"
+            placeholder="Search by title, model, or site…"
+            className="w-full rounded-xl border border-cinema-border/60 bg-cinema-card py-3 pl-12 pr-4 text-sm text-cinema-text placeholder:text-cinema-muted focus:border-cinema-accent focus:outline-none focus:ring-1 focus:ring-cinema-accent"
           />
         </div>
 

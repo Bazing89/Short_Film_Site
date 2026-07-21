@@ -1,14 +1,15 @@
 @import "tailwindcss";
 
 @theme {
-  --color-cinema-black: #0a0a0a;
-  --color-cinema-dark: #111111;
-  --color-cinema-card: #1a1a1a;
-  --color-cinema-border: #2a2a2a;
-  --color-cinema-muted: #888888;
-  --color-cinema-text: #e8e8e8;
-  --color-cinema-accent: #c9a84c;
-  --color-cinema-accent-hover: #dbb95e;
+  --color-cinema-black: #07070a;
+  --color-cinema-dark: #0e0e14;
+  --color-cinema-card: #16161f;
+  --color-cinema-border: #2a2a38;
+  --color-cinema-muted: #8b8b9e;
+  --color-cinema-text: #eeeef2;
+  --color-cinema-accent: #e879a8;
+  --color-cinema-accent-hover: #f0a0c0;
+  --color-cinema-glow: #a855f7;
 
   --font-display: "Georgia", "Times New Roman", serif;
   --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -35,6 +36,25 @@ body {
   font-family: var(--font-display);
 }
 
+.bg-mesh-gradient {
+  background-image:
+    radial-gradient(at 40% 20%, rgba(168, 85, 247, 0.15) 0px, transparent 50%),
+    radial-gradient(at 80% 0%, rgba(232, 121, 168, 0.12) 0px, transparent 50%),
+    radial-gradient(at 0% 50%, rgba(168, 85, 247, 0.08) 0px, transparent 50%),
+    radial-gradient(at 80% 80%, rgba(232, 121, 168, 0.06) 0px, transparent 50%);
+}
+
+.glass-card {
+  background: rgba(22, 22, 31, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.nav-pill {
+  @apply rounded-full border border-cinema-border bg-cinema-card/80 px-5 py-2.5 text-sm text-cinema-text transition-all hover:border-cinema-accent/50 hover:text-cinema-accent hover:shadow-md hover:shadow-cinema-accent/10;
+}
+
 @keyframes fade-in-up {
   from {
     opacity: 0;
@@ -43,6 +63,15 @@ body {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
   }
 }
 

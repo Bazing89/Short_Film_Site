@@ -94,8 +94,8 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search models..."
-            className="w-full rounded-lg border border-cinema-border bg-cinema-card py-3 pl-12 pr-4 text-sm text-cinema-text placeholder:text-cinema-muted focus:border-cinema-accent focus:outline-none focus:ring-1 focus:ring-cinema-accent"
+            placeholder="Search models by name…"
+            className="w-full rounded-xl border border-cinema-border/60 bg-cinema-card py-3 pl-12 pr-4 text-sm text-cinema-text placeholder:text-cinema-muted focus:border-cinema-accent focus:outline-none focus:ring-1 focus:ring-cinema-accent"
           />
         </div>
 
@@ -135,7 +135,11 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
               </>
             ) : (
               <p className="mt-10 text-center text-sm text-cinema-muted">
-                No models found. Import from the Python UI or publish videos with actor names.
+                No models found yet.{" "}
+                <a href="/" className="text-cinema-accent hover:underline">
+                  Search online
+                </a>{" "}
+                to import the first one.
               </p>
             )}
           </>

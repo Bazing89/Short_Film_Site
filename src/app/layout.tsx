@@ -8,12 +8,12 @@ export const metadata: Metadata = {
     process.env.NEXT_PUBLIC_SITE_URL || "https://bangheroes.com"
   ),
   title: {
-    default: "BangHeroes",
+    default: "BangHeroes — Model Search & Video Library",
     template: "%s | BangHeroes",
   },
   description:
-    "A curated collection of original short films. Premium indie cinema, streaming free.",
-  keywords: ["short films", "indie cinema", "filmmaker", "streaming"],
+    "Search models online across tube sites, import videos to the library, and browse what others have added.",
+  keywords: ["model search", "video library", "performer search", "BangHeroes"],
 };
 
 export default function RootLayout({

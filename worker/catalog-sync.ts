@@ -154,6 +154,74 @@ async function fetchHtml(url: string): Promise<string> {
   return html;
 }
 
+/** Pull poster from a video page (og:image / twitter:image). */
+export async function fetchPosterFromPage(pageUrl: string): Promise<string> {
+  try {
+    const html = await fetchHtml(pageUrl);
+    const patterns = [
+      /property=["']og:image["']\s+content=["']([^"']+)["']/i,
+      /content=["']([^"']+)["']\s+property=["']og:image["']/i,
+      /name=["']twitter:image(?::src)?["']\s+content=["']([^"']+)["']/i,
+      /content=["']([^"']+)["']\s+name=["']twitter:image(?::src)?["']/i,
+      /itemprop=["']image["']\s+content=["']([^"']+)["']/i,
+      /content=["']([^"']+)["']\s+itemprop=["']image["']/i,
+    ];
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      const url = match?.[1]?.trim();
+      if (url && /^https?:\/\//i.test(url)) {
+        return decodeHtmlEntities(url);
+      }
+    }
+  } catch {
+    /* ignore — caller keeps empty poster */
+  }
+  return "";
+}
+
+async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(concurrency, items.length || 1)) },
+    async () => {
+      while (next < items.length) {
+        const i = next++;
+        results[i] = await fn(items[i], i);
+      }
+    }
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+/** Fill missing listing thumbs by fetching each video page. */
+export async function enrichItemsWithPosters(
+  items: ScrapedItem[],
+  options: { concurrency?: number; log?: string[] } = {}
+): Promise<ScrapedItem[]> {
+  const concurrency = options.concurrency ?? 4;
+  const log = options.log;
+  const missing = items.filter((item) => !(item.poster || "").trim());
+  if (!missing.length) return items;
+
+  log?.push(`  Fetching thumbnails for ${missing.length} video(s)…`);
+  let filled = 0;
+  await mapPool(missing, concurrency, async (item) => {
+    const poster = await fetchPosterFromPage(item.url);
+    if (poster) {
+      item.poster = poster;
+      filled += 1;
+    }
+  });
+  log?.push(`  Thumbnails found: ${filled}/${missing.length}`);
+  return items;
+}
+
 function playvidsPathOk(path: string): boolean {
   const clean = path.split("?")[0];
   if (PLAYVIDS_SKIP_PREFIXES.some((p) => clean.startsWith(p))) return false;
@@ -181,10 +249,16 @@ export function parseFpo(html: string, limit = 100): ScrapedItem[] {
 
   const thumbMap = new Map<string, string>();
   for (const m of html.matchAll(
-    /href="(https?:\/\/(?:www\.)?fpo\.xxx\/video\/\d+\/[^"]+\/)"[^>]*>[\s\S]{0,600}?src="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/gi
+    /href="(https?:\/\/(?:www\.)?fpo\.xxx\/video\/\d+\/[^"]+\/)"[^>]*>[\s\S]{0,900}?(?:src|data-src|data-original)="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/gi
   )) {
     const key = m[1].split("?")[0];
     if (!thumbMap.has(key)) thumbMap.set(key, m[2]);
+  }
+  for (const m of html.matchAll(
+    /(?:src|data-src|data-original)="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"[^>]{0,200}>[\s\S]{0,400}?href="(https?:\/\/(?:www\.)?fpo\.xxx\/video\/\d+\/[^"]+\/)"/gi
+  )) {
+    const key = m[2].split("?")[0];
+    if (!thumbMap.has(key)) thumbMap.set(key, m[1]);
   }
 
   const out: ScrapedItem[] = [];
@@ -231,13 +305,13 @@ export function parsePlayvids(html: string, limit = 100): ScrapedItem[] {
 
   const thumbMap = new Map<string, string>();
   for (const m of html.matchAll(
-    /href="(\/[A-Za-z0-9]{8,14}\/[^"]+)"[^>]*>\s*<img[^>]+src="(https?:\/\/[^"]+)"/gi
+    /href="(\/[A-Za-z0-9]{8,14}\/[^"]+)"[^>]*>\s*<img[^>]+(?:src|data-src|data-original)="(https?:\/\/[^"]+)"/gi
   )) {
     const key = m[1].split("?")[0];
     if (!thumbMap.has(key)) thumbMap.set(key, m[2]);
   }
   for (const m of html.matchAll(
-    /href="(\/[A-Za-z0-9]{8,14}\/[^"]+)"[^>]*>[\s\S]*?src="(https?:\/\/[^"]+)"/gi
+    /href="(\/[A-Za-z0-9]{8,14}\/[^"]+)"[^>]*>[\s\S]{0,800}?(?:src|data-src|data-original)="(https?:\/\/[^"]+)"/gi
   )) {
     const key = m[1].split("?")[0];
     if (!thumbMap.has(key)) thumbMap.set(key, m[2]);
@@ -289,13 +363,27 @@ const SITE_LABELS: Record<string, string> = {
   playvids: "Playvids",
 };
 
+export function hasOutboundPoster(record: Pick<OutboundRecord, "posterUrl">): boolean {
+  return Boolean((record.posterUrl || "").trim());
+}
+
+/** Drop catalog entries that have no usable thumbnail. */
+export function filterOutboundWithPosters(
+  records: OutboundRecord[]
+): { kept: OutboundRecord[]; removed: number } {
+  const kept = records.filter(hasOutboundPoster);
+  return { kept, removed: records.length - kept.length };
+}
+
 function mergeOutbound(
   existing: OutboundRecord[],
   items: ScrapedItem[]
-): { merged: OutboundRecord[]; added: number; skipped: number } {
+): { merged: OutboundRecord[]; added: number; skipped: number; updated: number } {
   const byId = new Map<string, OutboundRecord>();
   const existingUrls = new Set<string>();
   for (const r of existing) {
+    // Never keep thumbnail-less rows in the working set
+    if (!hasOutboundPoster(r)) continue;
     byId.set(r.id, r);
     const u = normalizeSourceUrl(r.sourceUrl);
     if (u) existingUrls.add(u);
@@ -303,6 +391,7 @@ function mergeOutbound(
 
   let added = 0;
   let skipped = 0;
+  let updated = 0;
   const batchSeen = new Set<string>();
 
   for (const item of items) {
@@ -315,7 +404,21 @@ function mergeOutbound(
     batchSeen.add(sourceUrl);
 
     const id = outboundIdFromUrl(sourceUrl);
-    if (byId.has(id) || existingUrls.has(sourceUrl)) {
+    const poster = (item.poster || "").trim();
+    const existingRec = byId.get(id);
+    if (existingRec || existingUrls.has(sourceUrl)) {
+      if (existingRec && !existingRec.posterUrl && poster) {
+        existingRec.posterUrl = poster;
+        byId.set(existingRec.id, existingRec);
+        updated += 1;
+      } else {
+        skipped += 1;
+      }
+      continue;
+    }
+
+    // Never add videos without a thumbnail
+    if (!poster) {
       skipped += 1;
       continue;
     }
@@ -324,7 +427,7 @@ function mergeOutbound(
       id,
       title: cleanVideoTitle(item.title || sourceUrl),
       sourceUrl,
-      posterUrl: (item.poster || "").trim() || undefined,
+      posterUrl: poster,
       site: item.site || undefined,
       dateAdded: new Date().toISOString(),
     };
@@ -333,7 +436,7 @@ function mergeOutbound(
     added += 1;
   }
 
-  return { merged: [...byId.values()], added, skipped };
+  return { merged: [...byId.values()], added, skipped, updated };
 }
 
 export type CatalogSyncEnv = {
@@ -449,12 +552,28 @@ export async function runCatalogSync(
 
         emptyStreak = 0;
         pagesDone += 1;
-        const { merged, added, skipped } = mergeOutbound(films, items);
+
+        const existingByUrl = new Map(
+          films.map((r) => [normalizeSourceUrl(r.sourceUrl), r] as const)
+        );
+        const needsPosterFetch = items.filter((item) => {
+          if ((item.poster || "").trim()) return false;
+          const existingRec = existingByUrl.get(normalizeSourceUrl(item.url));
+          // Skip fetch when we already store this URL with a thumbnail
+          if (existingRec?.posterUrl) return false;
+          return true;
+        });
+        if (needsPosterFetch.length) {
+          await enrichItemsWithPosters(needsPosterFetch, { log });
+        }
+
+        const { merged, added, skipped, updated } = mergeOutbound(films, items);
         films = merged;
         totalAdded += added;
         totalSkipped += skipped;
         log.push(
-          `  [${label}] page ${page}: +${added} new, ${skipped} duplicate(s)`
+          `  [${label}] page ${page}: +${added} new, ${skipped} duplicate(s)` +
+            (updated ? `, ${updated} thumbnail(s) backfilled` : "")
         );
 
         // Persist after each page so partial progress survives timeouts
@@ -468,6 +587,15 @@ export async function runCatalogSync(
         }
       }
       if (stopped) break;
+    }
+
+    const purged = filterOutboundWithPosters(films);
+    if (purged.removed > 0) {
+      log.push(
+        `  Removed ${purged.removed} video(s) with no thumbnail from catalog.`
+      );
+      films = purged.kept;
+      await env.OUTBOUND.put("outbound-films", JSON.stringify(films));
     }
 
     log.push(

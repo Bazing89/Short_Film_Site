@@ -7,7 +7,7 @@ interface PageHeaderProps {
 
 export function PageHeader({ title, subtitle }: PageHeaderProps) {
   return (
-    <div className="border-b border-cinema-border/50 bg-cinema-dark">
+    <div className="border-b border-cinema-border/40 bg-gradient-to-b from-cinema-dark to-cinema-black">
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 sm:py-16 lg:px-8">
         <h1 className="font-display text-3xl text-cinema-text sm:text-4xl lg:text-5xl">
           {title}

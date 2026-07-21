@@ -3,14 +3,14 @@ import { ModelsCatalog } from "@/components/ModelsCatalog";
 
 export const metadata: Metadata = {
   title: "Models",
-  description: "Browse models and actors across the BangHeroes catalog.",
+  description: "Browse models in the video library — search performers and watch their imported videos.",
 };
 
 export default function ModelsPage() {
   return (
     <ModelsCatalog
       title="Models"
-      subtitle="Imported profiles and performers from videos across the catalog."
+      subtitle="Search performers and browse videos imported to the library."
     />
   );
 }

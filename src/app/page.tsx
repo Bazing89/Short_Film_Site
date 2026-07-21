@@ -1,5 +1,5 @@
-import { HomeContent } from "@/components/HomeContent";
+import { ModelSearchHome } from "@/components/ModelSearchHome";
 
 export default function HomePage() {
-  return <HomeContent />;
+  return <ModelSearchHome />;
 }

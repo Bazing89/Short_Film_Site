@@ -10,6 +10,10 @@
 
 import { BUILD_SECRETS } from "./generated-secrets";
 import {
+  enrichItemsWithPosters,
+  fetchPosterFromPage,
+  filterOutboundWithPosters,
+  hasOutboundPoster,
   loadSyncStatus,
   requestCatalogSyncStop,
   runCatalogSync,
@@ -377,24 +381,284 @@ async function loadOutboundFromAssets(request: Request, env: Env): Promise<Outbo
 }
 
 async function loadOutboundFilms(request: Request, env: Env): Promise<OutboundRecord[]> {
+  let records: OutboundRecord[] = [];
   if (env.OUTBOUND) {
     try {
       const raw = await env.OUTBOUND.get(OUTBOUND_KV_KEY);
       if (raw) {
         const data = JSON.parse(raw) as unknown;
-        if (Array.isArray(data)) return data as OutboundRecord[];
+        if (Array.isArray(data)) records = data as OutboundRecord[];
       }
     } catch {
       // fall through to assets
     }
   }
-  return loadOutboundFromAssets(request, env);
+  if (!records.length) {
+    records = await loadOutboundFromAssets(request, env);
+  }
+
+  const { kept, removed } = filterOutboundWithPosters(records);
+  // Persist cleanup so thumbnail-less videos stay gone
+  if (removed > 0 && env.OUTBOUND) {
+    try {
+      await env.OUTBOUND.put(OUTBOUND_KV_KEY, JSON.stringify(kept));
+    } catch {
+      /* ignore write errors on read path */
+    }
+  }
+  return kept;
 }
 
 async function saveOutboundFilms(env: Env, records: OutboundRecord[]): Promise<boolean> {
   if (!env.OUTBOUND) return false;
-  await env.OUTBOUND.put(OUTBOUND_KV_KEY, JSON.stringify(records));
+  const { kept } = filterOutboundWithPosters(records);
+  await env.OUTBOUND.put(OUTBOUND_KV_KEY, JSON.stringify(kept));
   return true;
+}
+
+type PublishOutboundResult = {
+  count: number;
+  added: number;
+  removedNoThumbnail: number;
+  persisted: boolean;
+  merged: OutboundRecord[];
+};
+
+/** Merge incoming outbound records into the catalog (shared by admin + public import). */
+async function mergeAndPublishOutbound(
+  request: Request,
+  env: Env,
+  incoming: OutboundRecord[],
+  replace = false
+): Promise<PublishOutboundResult> {
+  const normalized: OutboundRecord[] = [];
+  const seenIds = new Set<string>();
+  const seenUrls = new Set<string>();
+  for (const item of incoming) {
+    const sourceUrl = normalizeSourceUrl(String(item.sourceUrl || ""));
+    if (!sourceUrl || seenUrls.has(sourceUrl)) continue;
+    const id = String(item.id || "").trim() || outboundIdFromUrl(sourceUrl);
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    seenUrls.add(sourceUrl);
+    normalized.push({
+      id,
+      title: cleanVideoTitle(String(item.title || sourceUrl)),
+      sourceUrl,
+      posterUrl: String(item.posterUrl || "").trim() || undefined,
+      actor: String(item.actor || "").trim() || undefined,
+      site: String(item.site || "").trim() || undefined,
+      dateAdded: item.dateAdded || new Date().toISOString(),
+    });
+  }
+
+  const missingPoster = normalized.filter((r) => !r.posterUrl);
+  if (missingPoster.length) {
+    await Promise.all(
+      missingPoster.map(async (record) => {
+        const poster = await fetchPosterFromPage(record.sourceUrl);
+        if (poster) record.posterUrl = poster;
+      })
+    );
+  }
+
+  const withPosters = normalized.filter(hasOutboundPoster);
+  const droppedNoThumb = normalized.length - withPosters.length;
+
+  const existing = await loadOutboundFilms(request, env);
+  let merged: OutboundRecord[];
+  if (replace) {
+    merged = withPosters;
+  } else {
+    const byId = new Map(
+      existing.filter(hasOutboundPoster).map((r) => [r.id, r])
+    );
+    const byUrl = new Map(
+      [...byId.values()].map((r) => [normalizeSourceUrl(r.sourceUrl), r.id])
+    );
+    for (const rec of withPosters) {
+      const existingId = byUrl.get(rec.sourceUrl);
+      if (existingId && existingId !== rec.id) continue;
+      if (byId.has(rec.id)) {
+        const prev = byId.get(rec.id)!;
+        if (!prev.posterUrl && rec.posterUrl) {
+          byId.set(rec.id, { ...prev, posterUrl: rec.posterUrl });
+        }
+        continue;
+      }
+      byId.set(rec.id, rec);
+      byUrl.set(rec.sourceUrl, rec.id);
+    }
+    merged = [...byId.values()];
+  }
+
+  const purged = filterOutboundWithPosters(merged);
+  merged = purged.kept;
+  const removedNoThumbnail = droppedNoThumb + purged.removed;
+
+  const persisted = await saveOutboundFilms(env, merged);
+  return {
+    count: merged.length,
+    added: withPosters.length,
+    removedNoThumbnail,
+    persisted,
+    merged,
+  };
+}
+
+async function handlePublicModelSearch(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  const body = (await request.json().catch(() => ({}))) as {
+    model?: string;
+    actor?: string;
+    sources?: string[];
+    limit?: number;
+  };
+  const model = String(body.model || body.actor || "").trim();
+  if (model.length < 2) {
+    return json({ ok: false, error: "Enter a model name (2+ characters)" }, 400);
+  }
+  if (model.length > 80) {
+    return json({ ok: false, error: "Model name is too long" }, 400);
+  }
+
+  const limit = Math.min(24, Math.max(1, Number(body.limit) || 20));
+  try {
+    const { results, log } = await searchActorVideos(
+      model,
+      body.sources,
+      limit
+    );
+    const valid = results.filter((r) => r.url && !r.error);
+    await enrichItemsWithPosters(
+      valid.map((r) => ({
+        title: r.title,
+        url: r.url,
+        site: r.site,
+        poster: r.poster || "",
+      })),
+      { concurrency: 4 }
+    ).then((enriched) => {
+      const byUrl = new Map(enriched.map((e) => [e.url, e.poster || ""]));
+      for (const r of valid) {
+        if (!r.poster && byUrl.get(r.url)) {
+          r.poster = byUrl.get(r.url);
+        }
+      }
+    });
+    const withPosters = valid.filter((r) => (r.poster || "").trim());
+
+    let modelsCount = 0;
+    if (withPosters.length && env.OUTBOUND) {
+      let existingModels = await loadSiteModelsFromKv(env);
+      if (existingModels.length === 0) {
+        existingModels = (await loadSiteModels(
+          request,
+          env
+        )) as ImportSiteModel[];
+      }
+      const upsert = await upsertModelFromActorSearch(
+        env,
+        model,
+        withPosters,
+        existingModels
+      );
+      modelsCount = upsert.total;
+      log.push(...upsert.log);
+    } else {
+      modelsCount = (await loadSiteModels(request, env)).length;
+    }
+
+    return jsonFresh({
+      ok: true,
+      model,
+      count: withPosters.length,
+      results: withPosters,
+      modelsCount,
+      log,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return json({ ok: false, error: message }, 500);
+  }
+}
+
+async function handlePublicModelImport(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  const body = (await request.json().catch(() => ({}))) as {
+    model?: string;
+    actor?: string;
+    items?: Array<{
+      url?: string;
+      title?: string;
+      poster?: string;
+      site?: string;
+    }>;
+  };
+  const model = String(body.model || body.actor || "").trim();
+  const items = Array.isArray(body.items) ? body.items : [];
+  if (items.length === 0) {
+    return json({ ok: false, error: "Select at least one video to import" }, 400);
+  }
+  if (items.length > 30) {
+    return json({ ok: false, error: "Maximum 30 links per import" }, 400);
+  }
+
+  const records: OutboundRecord[] = [];
+  for (const item of items) {
+    const sourceUrl = normalizeSourceUrl(String(item.url || ""));
+    if (!sourceUrl) continue;
+    records.push({
+      id: outboundIdFromUrl(sourceUrl),
+      title: cleanVideoTitle(String(item.title || sourceUrl)),
+      sourceUrl,
+      posterUrl: String(item.poster || "").trim() || undefined,
+      actor: model || undefined,
+      site: String(item.site || "").trim() || undefined,
+      dateAdded: new Date().toISOString(),
+    });
+  }
+
+  if (records.length === 0) {
+    return json({ ok: false, error: "No valid links to import" }, 400);
+  }
+
+  const published = await mergeAndPublishOutbound(request, env, records, false);
+
+  if (model && env.OUTBOUND) {
+    let existingModels = await loadSiteModelsFromKv(env);
+    if (existingModels.length === 0) {
+      existingModels = (await loadSiteModels(request, env)) as ImportSiteModel[];
+    }
+    await upsertModelFromActorSearch(
+      env,
+      model,
+      items.map((i) => ({
+        url: i.url,
+        poster: i.poster,
+        site: i.site,
+      })),
+      existingModels
+    );
+  }
+
+  return json(
+    {
+      ok: published.persisted,
+      imported: published.added,
+      count: published.count,
+      persisted: published.persisted,
+      removedNoThumbnail: published.removedNoThumbnail,
+      error: published.persisted
+        ? undefined
+        : "KV binding OUTBOUND is missing — links could not be saved live.",
+    },
+    published.persisted ? 200 : 503
+  );
 }
 
 async function loadSiteModelsFromAssets(
@@ -789,65 +1053,27 @@ async function handleAdminApi(
       return json({ ok: false, error: "Provide films: []" }, 400);
     }
 
-    const normalized: OutboundRecord[] = [];
-    const seenIds = new Set<string>();
-    const seenUrls = new Set<string>();
-    for (const item of incoming) {
-      const sourceUrl = normalizeSourceUrl(String(item.sourceUrl || ""));
-      if (!sourceUrl || seenUrls.has(sourceUrl)) continue;
-      const id =
-        String(item.id || "").trim() || outboundIdFromUrl(sourceUrl);
-      if (seenIds.has(id)) continue;
-      seenIds.add(id);
-      seenUrls.add(sourceUrl);
-      normalized.push({
-        id,
-        title: cleanVideoTitle(String(item.title || sourceUrl)),
-        sourceUrl,
-        posterUrl: String(item.posterUrl || "").trim() || undefined,
-        actor: String(item.actor || "").trim() || undefined,
-        site: String(item.site || "").trim() || undefined,
-        dateAdded: item.dateAdded || new Date().toISOString(),
-      });
-    }
-
-    const existing = await loadOutboundFilms(request, env);
-    let merged: OutboundRecord[];
-    if (body.replace) {
-      merged = normalized;
-    } else {
-      const byId = new Map(existing.map((r) => [r.id, r]));
-      const byUrl = new Map(
-        existing.map((r) => [normalizeSourceUrl(r.sourceUrl), r.id])
-      );
-      for (const rec of normalized) {
-        const existingId = byUrl.get(rec.sourceUrl);
-        if (existingId && existingId !== rec.id) {
-          // Same URL already stored under another id — keep existing, skip duplicate
-          continue;
-        }
-        if (byId.has(rec.id)) {
-          // Already present — do not overwrite on non-replace posts
-          continue;
-        }
-        byId.set(rec.id, rec);
-        byUrl.set(rec.sourceUrl, rec.id);
-      }
-      merged = [...byId.values()];
-    }
-
-    const saved = await saveOutboundFilms(env, merged);
+    const published = await mergeAndPublishOutbound(
+      request,
+      env,
+      incoming,
+      body.replace === true
+    );
+    const saved = published.persisted;
     return json(
       {
         ok: true,
-        count: merged.length,
-        added: normalized.length,
+        count: published.count,
+        added: published.added,
+        removedNoThumbnail: published.removedNoThumbnail,
         persisted: saved,
         kvBound: Boolean(env.OUTBOUND),
         message: saved
-          ? "Saved to Cloudflare KV — site updates without rebuild"
+          ? published.removedNoThumbnail
+            ? `Saved to Cloudflare KV. Removed ${published.removedNoThumbnail} video(s) without thumbnails.`
+            : "Saved to Cloudflare KV — site updates without rebuild"
           : "KV binding OUTBOUND is missing. In Cloudflare Dashboard → Worker → Settings → Bindings → Add KV namespace named OUTBOUND, then retry.",
-        films: merged,
+        films: published.merged,
       },
       saved ? 200 : 503
     );
@@ -949,9 +1175,27 @@ async function handleAdminApi(
         body.limit ?? 24
       );
       const valid = results.filter((r) => r.url && !r.error);
+      // Ensure search hits carry thumbnails before the admin UI publishes them
+      await enrichItemsWithPosters(
+        valid.map((r) => ({
+          title: r.title,
+          url: r.url,
+          site: r.site,
+          poster: r.poster || "",
+        })),
+        { concurrency: 4 }
+      ).then((enriched) => {
+        const byUrl = new Map(enriched.map((e) => [e.url, e.poster || ""]));
+        for (const r of valid) {
+          if (!r.poster && byUrl.get(r.url)) {
+            r.poster = byUrl.get(r.url);
+          }
+        }
+      });
+      const withPosters = valid.filter((r) => (r.poster || "").trim());
       let modelLog: string[] = [];
       let modelsCount = 0;
-      if (valid.length && env.OUTBOUND) {
+      if (withPosters.length && env.OUTBOUND) {
         let existingModels = await loadSiteModelsFromKv(env);
         if (existingModels.length === 0) {
           existingModels = (await loadSiteModels(
@@ -962,7 +1206,7 @@ async function handleAdminApi(
         const upsert = await upsertModelFromActorSearch(
           env,
           actor,
-          results,
+          withPosters,
           existingModels
         );
         modelLog = upsert.log;
@@ -973,8 +1217,8 @@ async function handleAdminApi(
       return jsonFresh({
         ok: true,
         actor,
-        count: valid.length,
-        results,
+        count: withPosters.length,
+        results: withPosters,
         log: [...log, ...modelLog],
         modelsCount,
       });
@@ -1507,6 +1751,14 @@ export default {
             err instanceof Error ? err.message : "Failed to load models";
           return json({ ok: false, error: message, models: [] }, 500);
         }
+      }
+
+      if (url.pathname === "/api/model-search" && request.method === "POST") {
+        return handlePublicModelSearch(request, env);
+      }
+
+      if (url.pathname === "/api/model-import" && request.method === "POST") {
+        return handlePublicModelImport(request, env);
       }
 
       if (url.pathname === "/api/bop-models") {

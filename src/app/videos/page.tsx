@@ -3,7 +3,7 @@ import { VideosCatalog } from "@/components/VideosCatalog";
 
 export const metadata: Metadata = {
   title: "Videos",
-  description: "Browse the full BangHeroes video catalog.",
+  description: "Search and browse all videos in the BangHeroes library.",
 };
 
 export default function VideosPage() {

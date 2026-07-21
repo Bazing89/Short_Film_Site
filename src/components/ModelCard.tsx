@@ -11,7 +11,7 @@ export function ModelCard({ model, site }: ModelCardProps) {
       href={modelDetailPath(model.name, site)}
       className="group flex flex-col gap-3"
     >
-      <div className="relative aspect-[3/4] w-full overflow-hidden rounded-lg border border-cinema-border/50 bg-cinema-card transition-colors group-hover:border-cinema-accent/40">
+      <div className="relative aspect-[3/4] w-full overflow-hidden rounded-xl border border-cinema-border/40 bg-cinema-card transition-all duration-300 group-hover:border-cinema-accent/50 group-hover:shadow-lg group-hover:shadow-cinema-accent/5">
         {model.poster ? (
           /* eslint-disable-next-line @next/next/no-img-element */
           <img

@@ -9,9 +9,9 @@ export function VideoCard({ film }: VideoCardProps) {
   return (
     <a
       href={filmWatchPath(film)}
-      className="group flex w-full flex-col gap-2"
+      className="group flex w-full flex-col gap-2.5"
     >
-      <div className="relative aspect-video w-full overflow-hidden rounded-md border border-cinema-border/50 bg-cinema-card transition-colors group-hover:border-cinema-accent/40">
+      <div className="relative aspect-video w-full overflow-hidden rounded-xl border border-cinema-border/40 bg-cinema-card transition-all duration-300 group-hover:border-cinema-accent/50 group-hover:shadow-lg group-hover:shadow-cinema-accent/5">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={film.poster}

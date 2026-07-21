@@ -430,10 +430,10 @@ export function AdminPanel() {
 
   async function publishSelected() {
     const items = results.filter(
-      (r) => r.url && !r.error && selected.has(r.url)
+      (r) => r.url && !r.error && selected.has(r.url) && (r.poster || "").trim()
     );
     if (items.length === 0) {
-      appendLog("Select at least one search result");
+      appendLog("Select at least one search result with a thumbnail");
       return;
     }
     setPublishing(true);

@@ -434,7 +434,13 @@ def _parse_fpo(html: str, limit: int) -> list[dict]:
         ]
     thumb_map: dict[str, str] = {}
     for url, thumb in re.findall(
-        r'href="(https?://(?:www\.)?fpo\.xxx/video/\d+/[^"]+/)"[^>]*>.{0,600}?src="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"',
+        r'href="(https?://(?:www\.)?fpo\.xxx/video/\d+/[^"]+/)"[^>]*>.{0,900}?(?:src|data-src|data-original)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"',
+        html,
+        flags=re.I | re.S,
+    ):
+        thumb_map.setdefault(url.split("?")[0], thumb)
+    for thumb, url in re.findall(
+        r'(?:src|data-src|data-original)="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"[^>]{0,200}>.{0,400}?href="(https?://(?:www\.)?fpo\.xxx/video/\d+/[^"]+/)"',
         html,
         flags=re.I | re.S,
     ):
@@ -559,13 +565,13 @@ def _parse_playvids(html: str, limit: int) -> list[dict]:
 
     thumb_map: dict[str, str] = {}
     for path, thumb in re.findall(
-        r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"[^>]*>\s*<img[^>]+src="(https?://[^"]+)"',
+        r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"[^>]*>\s*<img[^>]+(?:src|data-src|data-original)="(https?://[^"]+)"',
         html,
         flags=re.I | re.S,
     ):
         thumb_map.setdefault(path.split("?")[0], thumb)
     for path, thumb in re.findall(
-        r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"[^>]*>.*?src="(https?://[^"]+)"',
+        r'href="(/[A-Za-z0-9]{8,14}/[^"]+)"[^>]*>.{0,800}?(?:src|data-src|data-original)="(https?://[^"]+)"',
         html,
         flags=re.I | re.S,
     ):
@@ -642,6 +648,15 @@ def outbound_id_for_url(source_url: str) -> str:
     return f"out_{digest[:12]}"
 
 
+def has_outbound_poster(record: dict) -> bool:
+    return bool(str(record.get("posterUrl") or record.get("poster") or "").strip())
+
+
+def filter_outbound_with_posters(records: list[dict]) -> tuple[list[dict], int]:
+    kept = [r for r in records if has_outbound_poster(r)]
+    return kept, len(records) - len(kept)
+
+
 def load_outbound_films() -> list[dict]:
     path = OUTBOUND_PUBLIC if OUTBOUND_PUBLIC.exists() else OUTBOUND_OUT
     if not path.exists():
@@ -650,11 +665,17 @@ def load_outbound_films() -> list[dict]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
-    return data if isinstance(data, list) else []
+    records = data if isinstance(data, list) else []
+    kept, removed = filter_outbound_with_posters(records)
+    if removed:
+        save_outbound_films(kept)
+    return kept
 
 
 def save_outbound_films(records: list[dict]) -> None:
-    payload = json.dumps(records, indent=2, ensure_ascii=False) + "\n"
+    # Never persist videos without a thumbnail
+    cleaned, _ = filter_outbound_with_posters(records)
+    payload = json.dumps(cleaned, indent=2, ensure_ascii=False) + "\n"
     OUTBOUND_PUBLIC.parent.mkdir(parents=True, exist_ok=True)
     OUTBOUND_PUBLIC.write_text(payload, encoding="utf-8")
     if OUTBOUND_OUT.parent.exists():
@@ -669,35 +690,51 @@ def fetch_poster_from_page(page_url: str) -> str:
     for pattern in (
         r'property="og:image"\s+content="([^"]+)"',
         r'content="([^"]+)"\s+property="og:image"',
-        r'name="twitter:image"\s+content="([^"]+)"',
-        r'content="([^"]+)"\s+name="twitter:image"',
+        r'name="twitter:image(?::src)?"\s+content="([^"]+)"',
+        r'content="([^"]+)"\s+name="twitter:image(?::src)?"',
+        r'itemprop="image"\s+content="([^"]+)"',
+        r'content="([^"]+)"\s+itemprop="image"',
     ):
         match = re.search(pattern, html, flags=re.I)
         if match:
-            return html_lib.unescape(match.group(1).strip())
+            url = html_lib.unescape(match.group(1).strip())
+            if url.startswith("http"):
+                return url
     return ""
 
 
 def enrich_search_results_with_posters(
     results: list[dict],
     log: LogFn = print,
-    max_fetches: int = 8,
+    max_fetches: int = 80,
 ) -> list[dict]:
     """Fill missing thumbnails on search hits (for UI + model auto-push)."""
-    enriched: list[dict] = []
-    fetches = 0
-    for item in results:
-        if item.get("error") or not item.get("url"):
-            enriched.append(item)
-            continue
-        copy = dict(item)
-        poster = str(copy.get("poster") or "").strip()
-        if not poster and fetches < max_fetches:
-            poster = fetch_poster_from_page(str(copy.get("url") or ""))
-            fetches += 1
+    missing_indexes = [
+        i
+        for i, item in enumerate(results)
+        if not item.get("error")
+        and item.get("url")
+        and not str(item.get("poster") or "").strip()
+    ]
+    if not missing_indexes:
+        return results
+
+    to_fetch = missing_indexes[: max(0, max_fetches)]
+    log(f"  Fetching thumbnails for {len(to_fetch)} video(s)…")
+    filled = 0
+    enriched = [dict(item) for item in results]
+
+    def _fetch_one(idx: int) -> tuple[int, str]:
+        url = str(enriched[idx].get("url") or "")
+        return idx, fetch_poster_from_page(url)
+
+    workers = min(6, max(1, len(to_fetch)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for idx, poster in pool.map(_fetch_one, to_fetch):
             if poster:
-                copy["poster"] = poster
-        enriched.append(copy)
+                enriched[idx]["poster"] = poster
+                filled += 1
+    log(f"  Thumbnails found: {filled}/{len(to_fetch)}")
     return enriched
 
 
@@ -829,6 +866,9 @@ def sync_outbound_to_live_site(films: list[dict], log: LogFn = print) -> dict:
     Uses `wrangler kv key put` (direct to KV API) so Cloudflare WAF / Error 1010
     on the Worker URL cannot block sync.
     """
+    films, removed = filter_outbound_with_posters(films)
+    if removed:
+        log(f"  Dropped {removed} link(s) without thumbnails before KV sync.")
     tmp_path = HERE / ".outbound-sync.json"
     try:
         tmp_path.write_text(
@@ -920,21 +960,36 @@ def publish_outbound_links(
         if actor and actor.lower() not in title.lower():
             title = f"{actor} — {title}"
 
+        poster = str(item.get("poster") or item.get("posterUrl") or "").strip()
+
         if film_id in by_id or source_url in existing_urls:
+            existing_rec = by_id.get(film_id)
+            if existing_rec and not existing_rec.get("posterUrl"):
+                if not poster:
+                    poster = fetch_poster_from_page(source_url)
+                if poster:
+                    existing_rec["posterUrl"] = poster
+                    by_id[film_id] = existing_rec
+                    log(f"  Backfilled thumbnail: {title[:70]}")
+                    continue
             skipped += 1
             log(f"  Skip duplicate: {title[:70]}")
             continue
 
-        poster = str(item.get("poster") or item.get("posterUrl") or "").strip()
         if not poster:
             log(f"  Fetching thumbnail for {title[:48]}…")
             poster = fetch_poster_from_page(source_url)
+
+        if not poster:
+            skipped += 1
+            log(f"  Skip (no thumbnail): {title[:70]}")
+            continue
 
         record = {
             "id": film_id,
             "title": title,
             "sourceUrl": source_url,
-            "posterUrl": poster or None,
+            "posterUrl": poster,
             "actor": actor or None,
             "site": str(item.get("site") or "").strip() or None,
             "dateAdded": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -943,11 +998,19 @@ def publish_outbound_links(
         existing_urls.add(source_url)
         added += 1
 
+    # Drop any existing catalog rows that still have no thumbnail
+    before = len(by_id)
+    by_id = {rid: rec for rid, rec in by_id.items() if has_outbound_poster(rec)}
+    removed_no_thumb = before - len(by_id)
+    if removed_no_thumb:
+        log(f"  Removed {removed_no_thumb} video(s) with no thumbnail from catalog.")
+
     merged = list(by_id.values())
     save_outbound_films(merged)
     log(
         f"Published {added} new outbound link(s)"
-        + (f", skipped {skipped} duplicate(s)" if skipped else "")
+        + (f", skipped {skipped}" if skipped else "")
+        + (f", removed {removed_no_thumb} without thumbnails" if removed_no_thumb else "")
         + f". Catalog size: {len(merged)}"
     )
 
@@ -1048,6 +1111,7 @@ def import_catalog_to_site(
                 continue
             empty_streak = 0
             pages_done += 1
+            enrich_search_results_with_posters(items, log=log)
             result = publish_outbound_links(items, actor_name="", log=log)
             added = int(result.get("added") or 0)
             skipped = int(result.get("skipped") or 0)
