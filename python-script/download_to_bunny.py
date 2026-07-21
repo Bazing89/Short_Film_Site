@@ -327,7 +327,7 @@ def _parse_xvideos(html: str, limit: int) -> list[dict]:
                 "poster": thumb_map.get(path, ""),
             }
         )
-        if len(out) >= limit:
+        if limit > 0 and len(out) >= limit:
             break
     return out
 
@@ -367,7 +367,7 @@ def _parse_xnxx(html: str, limit: int) -> list[dict]:
                 "poster": thumb_map.get(path, ""),
             }
         )
-        if len(out) >= limit:
+        if limit > 0 and len(out) >= limit:
             break
     return out
 
@@ -412,7 +412,7 @@ def _parse_pornhub(html: str, limit: int) -> list[dict]:
                 "poster": thumb_map.get(path, ""),
             }
         )
-        if len(out) >= limit:
+        if limit > 0 and len(out) >= limit:
             break
     return out
 
@@ -464,7 +464,7 @@ def _parse_fpo(html: str, limit: int) -> list[dict]:
                 "poster": thumb_map.get(url, ""),
             }
         )
-        if len(out) >= limit:
+        if limit > 0 and len(out) >= limit:
             break
     return out
 
@@ -516,7 +516,7 @@ def _parse_eporner(html: str, limit: int) -> list[dict]:
                 "poster": thumb_map.get(path, ""),
             }
         )
-        if len(out) >= limit:
+        if limit > 0 and len(out) >= limit:
             break
     return out
 
@@ -600,7 +600,7 @@ def _parse_playvids(html: str, limit: int) -> list[dict]:
                 "poster": thumb_map.get(path, ""),
             }
         )
-        if len(out) >= limit:
+        if limit > 0 and len(out) >= limit:
             break
     return out
 
@@ -1352,7 +1352,7 @@ def _parse_fpo_models_page(html: str, limit: int) -> list[dict]:
                 "sourceSite": "fpo.xxx",
             }
         )
-        if len(out) >= limit:
+        if limit > 0 and len(out) >= limit:
             break
     return out
 
@@ -1446,7 +1446,7 @@ def _parse_indexxx_models_page(
                 "sourceSite": source_site,
             }
         )
-        if len(out) >= limit:
+        if limit > 0 and len(out) >= limit:
             break
     return out
 
@@ -1566,7 +1566,7 @@ def _parse_generic_models_page(html: str, base_url: str, limit: int) -> list[dic
                 "sourceSite": host,
             }
         )
-        if len(out) >= limit:
+        if limit > 0 and len(out) >= limit:
             break
     return out
 
@@ -1921,16 +1921,48 @@ _PARSERS = {
 }
 
 
+def _search_page_url(key: str, query: str, page: int) -> str:
+    q = urllib.parse.quote(query)
+    if key == "xvideos":
+        if page <= 0:
+            return f"https://www.xvideos.com/?k={q}"
+        return f"https://www.xvideos.com/?k={q}&p={page}"
+    if key == "xnxx":
+        return f"https://www.xnxx.com/search/{q}/{max(0, page)}"
+    if key == "pornhub":
+        if page <= 0:
+            return f"https://www.pornhub.com/video/search?search={q}"
+        return f"https://www.pornhub.com/video/search?search={q}&page={page + 1}"
+    if key == "fpo":
+        if page <= 0:
+            return f"https://www.fpo.xxx/search/{q}/"
+        return f"https://www.fpo.xxx/search/{q}/{page + 1}/"
+    if key == "eporner":
+        if page <= 0:
+            return f"https://www.eporner.com/search/{q}/"
+        return f"https://www.eporner.com/search/{q}/{page + 1}/"
+    if key == "playvids":
+        if page <= 0:
+            return f"https://www.playvids.com/search?q={q}"
+        return f"https://www.playvids.com/search?q={q}&page={page + 1}"
+    source = SEARCH_SOURCES.get(key)
+    if source:
+        return source["url"](query)
+    return ""
+
+
 def search_actor_videos(
     actor_name: str,
     sources: list[str] | None = None,
-    limit_per_source: int = 24,
+    limit_per_source: int = 0,
 ) -> list[dict]:
-    """Search supported sites for videos matching an actor name."""
+    """Search supported sites for videos matching an actor name (all result pages)."""
     actor = (actor_name or "").strip()
     if not actor:
         raise ValueError("Actor name is required")
 
+    unlimited = not limit_per_source or limit_per_source <= 0
+    cap = 0 if unlimited else max(1, int(limit_per_source))
     chosen = sources or list(SEARCH_SOURCES.keys())
     results: list[dict] = []
     seen_urls: set[str] = set()
@@ -1940,28 +1972,46 @@ def search_actor_videos(
         parser = _PARSERS.get(key)
         if not source or not parser:
             continue
-        search_url = source["url"](actor)
-        try:
-            page = _fetch_search_html(search_url)
-            found = parser(page, limit_per_source)
-        except Exception as exc:  # noqa: BLE001
-            results.append(
-                {
-                    "id": f"error:{key}",
-                    "title": f"Search failed on {source['label']}: {exc}",
-                    "url": "",
-                    "site": key,
-                    "error": True,
-                }
-            )
-            continue
+        source_total = 0
+        page = 0
+        while True:
+            search_url = _search_page_url(key, actor, page)
+            if not search_url:
+                break
+            try:
+                page_html = _fetch_search_html(search_url)
+            except Exception as exc:  # noqa: BLE001
+                if page == 0:
+                    results.append(
+                        {
+                            "id": f"error:{key}",
+                            "title": f"Search failed on {source['label']}: {exc}",
+                            "url": "",
+                            "site": key,
+                            "error": True,
+                        }
+                    )
+                break
 
-        for item in found:
-            if item["url"] in seen_urls:
-                continue
-            seen_urls.add(item["url"])
-            item["actor"] = actor
-            results.append(item)
+            remaining = 0 if unlimited else max(0, cap - source_total)
+            found = parser(page_html, remaining)
+            if not found:
+                break
+
+            for item in found:
+                url = item.get("url") or ""
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                item["actor"] = actor
+                results.append(item)
+                source_total += 1
+                if not unlimited and source_total >= cap:
+                    break
+
+            if not unlimited and source_total >= cap:
+                break
+            page += 1
 
     return [r for r in results if not r.get("error")] + [
         r for r in results if r.get("error")

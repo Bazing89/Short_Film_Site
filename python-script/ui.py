@@ -186,11 +186,11 @@ def _start_worker() -> tuple[bool, str]:
     return True, "Started"
 
 
-def _run_search(actor: str, sources: list[str], limit: int) -> None:
+def _run_search(actor: str, sources: list[str]) -> None:
     global _searching, _search_results, _search_error, _search_actor, _search_worker
     try:
         results = bunny.search_actor_videos(
-            actor, sources=sources or None, limit_per_source=limit
+            actor, sources=sources or None, limit_per_source=0
         )
         results = bunny.enrich_search_results_with_posters(results, log=_append_log)
         valid = [r for r in results if r.get("url") and not r.get("error")]
@@ -209,13 +209,11 @@ def _run_search(actor: str, sources: list[str], limit: int) -> None:
             _search_worker = None
 
 
-def _start_search(actor: str, sources: list[str], limit: int) -> tuple[bool, str]:
+def _start_search(actor: str, sources: list[str]) -> tuple[bool, str]:
     global _searching, _search_worker, _search_error, _search_results, _search_actor
     actor = (actor or "").strip()
     if not actor:
         return False, "Enter an actor name"
-    if limit < 1 or limit > 60:
-        return False, "Limit must be between 1 and 60"
     with _state_lock:
         if _searching:
             return False, "Search already running"
@@ -230,7 +228,7 @@ def _start_search(actor: str, sources: list[str], limit: int) -> tuple[bool, str
         _search_results = []
         _search_actor = actor
         _search_worker = threading.Thread(
-            target=_run_search, args=(actor, sources, limit), daemon=True
+            target=_run_search, args=(actor, sources), daemon=True
         )
         _search_worker.start()
     return True, "Searching"
@@ -790,7 +788,6 @@ PAGE = r"""<!DOCTYPE html>
         <h2>Find by actor</h2>
         <div class="row">
           <input class="actor-input" id="actor" type="text" placeholder="Actor name" />
-          <input id="limit" type="number" min="1" max="60" value="24" title="Results per site" />
           <button class="btn-primary" id="searchBtn" type="button">Search</button>
         </div>
         <div class="sources" id="sources"></div>
@@ -1084,7 +1081,6 @@ PAGE = r"""<!DOCTYPE html>
           body: JSON.stringify({
             actor: $("actor").value,
             sources: selectedSources(),
-            limit: Number($("limit").value || 24),
           }),
         });
         toast("Searching…");
@@ -1319,7 +1315,6 @@ class Handler(BaseHTTPRequestHandler):
             ok, message = _start_search(
                 str(data.get("actor") or ""),
                 list(data.get("sources") or []),
-                int(data.get("limit") or 24),
             )
             self._send(
                 200 if ok else 400,

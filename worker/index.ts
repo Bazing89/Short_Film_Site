@@ -524,12 +524,16 @@ async function handlePublicModelSearch(
     return json({ ok: false, error: "Model name is too long" }, 400);
   }
 
-  const limit = Math.min(24, Math.max(1, Number(body.limit) || 20));
+  const limitPerSource = Number(body.limit);
+  const searchLimit =
+    Number.isFinite(limitPerSource) && limitPerSource > 0
+      ? limitPerSource
+      : 0;
   try {
     const { results, log } = await searchActorVideos(
       model,
       body.sources,
-      limit
+      searchLimit
     );
     const valid = results.filter((r) => r.url && !r.error);
     await enrichItemsWithPosters(
@@ -539,7 +543,7 @@ async function handlePublicModelSearch(
         site: r.site,
         poster: r.poster || "",
       })),
-      { concurrency: 4 }
+      { concurrency: 8 }
     ).then((enriched) => {
       const byUrl = new Map(enriched.map((e) => [e.url, e.poster || ""]));
       for (const r of valid) {
@@ -583,9 +587,6 @@ async function handlePublicModelImport(
   const items = Array.isArray(body.items) ? body.items : [];
   if (items.length === 0) {
     return json({ ok: false, error: "Select at least one video to import" }, 400);
-  }
-  if (items.length > 30) {
-    return json({ ok: false, error: "Maximum 30 links per import" }, 400);
   }
 
   const records: OutboundRecord[] = [];
@@ -1148,10 +1149,15 @@ async function handleAdminApi(
       return json({ ok: false, error: "Actor name is required" }, 400);
     }
     try {
+      const limitPerSource = Number(body.limit);
+      const searchLimit =
+        Number.isFinite(limitPerSource) && limitPerSource > 0
+          ? limitPerSource
+          : 0;
       const { results, log } = await searchActorVideos(
         actor,
         body.sources,
-        body.limit ?? 24
+        searchLimit
       );
       const valid = results.filter((r) => r.url && !r.error);
       // Ensure search hits carry thumbnails before the admin UI publishes them
@@ -1162,7 +1168,7 @@ async function handleAdminApi(
           site: r.site,
           poster: r.poster || "",
         })),
-        { concurrency: 4 }
+        { concurrency: 8 }
       ).then((enriched) => {
         const byUrl = new Map(enriched.map((e) => [e.url, e.poster || ""]));
         for (const r of valid) {

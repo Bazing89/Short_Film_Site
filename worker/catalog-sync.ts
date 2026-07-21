@@ -273,7 +273,7 @@ export function parseFpo(html: string, limit = 100): ScrapedItem[] {
       site: "fpo",
       poster: thumbMap.get(url) || "",
     });
-    if (out.length >= limit) break;
+    if (limit > 0 && out.length >= limit) break;
   }
   return out;
 }
@@ -333,7 +333,7 @@ export function parsePlayvids(html: string, limit = 100): ScrapedItem[] {
       site: "playvids",
       poster: thumbMap.get(path) || "",
     });
-    if (out.length >= limit) break;
+    if (limit > 0 && out.length >= limit) break;
   }
   return out;
 }

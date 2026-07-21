@@ -101,7 +101,6 @@ export function AdminPanel() {
 
   // Search
   const [actor, setActor] = useState("");
-  const [searchLimit, setSearchLimit] = useState(24);
   const [searchSources, setSearchSources] = useState<string[]>(
     SEARCH_SOURCES.map((s) => s.key)
   );
@@ -401,7 +400,6 @@ export function AdminPanel() {
       body: JSON.stringify({
         actor: name,
         sources: searchSources,
-        limit: searchLimit,
       }),
     });
     setSearching(false);
@@ -755,15 +753,6 @@ export function AdminPanel() {
               onChange={(e) => setActor(e.target.value)}
               placeholder="Actor name"
               className="min-w-[180px] flex-1 rounded-md border border-cinema-border bg-cinema-dark px-3 py-2 text-cinema-text"
-            />
-            <input
-              type="number"
-              min={1}
-              max={60}
-              value={searchLimit}
-              onChange={(e) => setSearchLimit(Number(e.target.value) || 24)}
-              title="Results per site"
-              className="w-20 rounded-md border border-cinema-border bg-cinema-dark px-2 py-2 text-cinema-text"
             />
             <button
               type="button"

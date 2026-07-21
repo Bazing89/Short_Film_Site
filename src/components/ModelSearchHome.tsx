@@ -32,6 +32,30 @@ const SOURCE_LABELS: Record<string, string> = {
   playvids: "Playvids",
 };
 
+function normalizeVideoUrl(url: string): string {
+  const raw = (url || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    let host = parsed.hostname.toLowerCase();
+    if (host.startsWith("www.")) host = host.slice(4);
+    let path = parsed.pathname || "/";
+    path = path.replace(/\/{2,}/g, "/");
+    if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+    return `${parsed.protocol}//${host}${path}${parsed.search}`;
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
+}
+
+function libraryUrlSet(films: ReturnType<typeof getFilmsForModel>["films"]): Set<string> {
+  const urls = new Set<string>();
+  for (const film of films) {
+    if (film.sourceUrl) urls.add(normalizeVideoUrl(film.sourceUrl));
+  }
+  return urls;
+}
+
 export function ModelSearchHome() {
   const [query, setQuery] = useState("");
   const [activeModel, setActiveModel] = useState("");
@@ -104,17 +128,31 @@ export function ModelSearchHome() {
     setImportMessage("");
     setResults([]);
     setSelected(new Set());
+    setLibraryFilms([]);
     setHasSearched(true);
     setActiveModel(name);
 
     try {
-      const data = await searchModelOnline(name, sources);
+      const [data, allFilms] = await Promise.all([
+        searchModelOnline(name, sources),
+        fetchFilms(),
+      ]);
+      const slug = modelSlug(name);
+      const { films: matched } = getFilmsForModel(allFilms, slug, {
+        modelName: name,
+      });
+      setLibraryFilms(matched);
+
+      const alreadyInLibrary = libraryUrlSet(matched);
       const list = (data.results ?? []).filter(
-        (r) => r.url && !r.error && (r.poster || "").trim()
+        (r) =>
+          r.url &&
+          !r.error &&
+          (r.poster || "").trim() &&
+          !alreadyInLibrary.has(normalizeVideoUrl(r.url))
       );
       setResults(list);
       setSelected(new Set(list.map((r) => r.url)));
-      void refreshLibraryForModel(name);
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : "Search failed");
     } finally {
@@ -299,6 +337,34 @@ export function ModelSearchHome() {
           </div>
         ) : null}
 
+        {/* Already in library */}
+        {hasSearched && activeModel && libraryFilms.length > 0 ? (
+          <section className="mb-14">
+            <div className="mb-6 flex items-end justify-between gap-4">
+              <div>
+                <h2 className="font-display text-2xl text-cinema-text">
+                  Already in library
+                </h2>
+                <p className="mt-1 text-sm text-cinema-muted">
+                  {libraryFilms.length} video
+                  {libraryFilms.length !== 1 ? "s" : ""} matching “{activeModel}”
+                </p>
+              </div>
+              <Link
+                href={modelDetailPath(activeModel)}
+                className="text-sm text-cinema-accent transition-colors hover:text-cinema-accent-hover"
+              >
+                View all →
+              </Link>
+            </div>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+              {libraryFilms.map((film) => (
+                <VideoCard key={film.slug} film={film} />
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         {/* Search results */}
         {hasSearched ? (
           <section className="mb-14">
@@ -306,13 +372,19 @@ export function ModelSearchHome() {
               <div>
                 <h2 className="font-display text-2xl text-cinema-text sm:text-3xl">
                   {searching
-                    ? "Searching…"
+                    ? "Searching online…"
                     : results.length > 0
-                      ? `${results.length} result${results.length !== 1 ? "s" : ""} for “${activeModel}”`
-                      : `No results for “${activeModel}”`}
+                      ? `${results.length} new result${results.length !== 1 ? "s" : ""} to import`
+                      : libraryFilms.length > 0
+                        ? "No new videos found online"
+                        : `No results for “${activeModel}”`}
                 </h2>
                 <p className="mt-1 text-sm text-cinema-muted">
-                  Select videos to import into the site library
+                  {results.length > 0
+                    ? "Select videos to add to the site library"
+                    : libraryFilms.length > 0
+                      ? "Everything matching this name is already in your library above"
+                      : "Try a different spelling or enable more search sources above"}
                 </p>
               </div>
               {results.length > 0 ? (
@@ -405,38 +477,12 @@ export function ModelSearchHome() {
                 })}
               </div>
             ) : !searching ? (
-              <p className="text-center text-sm text-cinema-muted">
-                Try a different spelling or enable more search sources above.
-              </p>
-            ) : null}
-          </section>
-        ) : null}
-
-        {/* Already in library */}
-        {activeModel && libraryFilms.length > 0 ? (
-          <section className="mb-14">
-            <div className="mb-6 flex items-end justify-between gap-4">
-              <div>
-                <h2 className="font-display text-2xl text-cinema-text">
-                  Already in library
-                </h2>
-                <p className="mt-1 text-sm text-cinema-muted">
-                  {libraryFilms.length} video
-                  {libraryFilms.length !== 1 ? "s" : ""} for {activeModel}
+              libraryFilms.length === 0 ? (
+                <p className="text-center text-sm text-cinema-muted">
+                  Try a different spelling or enable more search sources above.
                 </p>
-              </div>
-              <Link
-                href={modelDetailPath(activeModel)}
-                className="text-sm text-cinema-accent transition-colors hover:text-cinema-accent-hover"
-              >
-                View all →
-              </Link>
-            </div>
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-              {libraryFilms.slice(0, 8).map((film) => (
-                <VideoCard key={film.slug} film={film} />
-              ))}
-            </div>
+              ) : null
+            ) : null}
           </section>
         ) : null}
 

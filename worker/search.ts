@@ -103,7 +103,7 @@ function parseXvideos(html: string, limit: number): SearchResult[] {
       site: "xvideos",
       poster: thumbMap.get(path) || "",
     });
-    if (out.length >= limit) break;
+    if (limit > 0 && out.length >= limit) break;
   }
   return out;
 }
@@ -140,7 +140,7 @@ function parseXnxx(html: string, limit: number): SearchResult[] {
       site: "xnxx",
       poster: thumbMap.get(path) || "",
     });
-    if (out.length >= limit) break;
+    if (limit > 0 && out.length >= limit) break;
   }
   return out;
 }
@@ -174,7 +174,7 @@ function parsePornhub(html: string, limit: number): SearchResult[] {
       site: "pornhub",
       poster: thumbMap.get(path) || "",
     });
-    if (out.length >= limit) break;
+    if (limit > 0 && out.length >= limit) break;
   }
   return out;
 }
@@ -217,9 +217,40 @@ function parseEporner(html: string, limit: number): SearchResult[] {
       site: "eporner",
       poster: thumbMap.get(path) || "",
     });
-    if (out.length >= limit) break;
+    if (limit > 0 && out.length >= limit) break;
   }
   return out;
+}
+
+/** Build paginated search URLs (page is 0-based). */
+function searchPageUrl(key: string, query: string, page: number): string {
+  const q = encodeURIComponent(query);
+  switch (key) {
+    case "xvideos":
+      return page <= 0
+        ? `https://www.xvideos.com/?k=${q}`
+        : `https://www.xvideos.com/?k=${q}&p=${page}`;
+    case "xnxx":
+      return `https://www.xnxx.com/search/${q}/${Math.max(0, page)}`;
+    case "pornhub":
+      return page <= 0
+        ? `https://www.pornhub.com/video/search?search=${q}`
+        : `https://www.pornhub.com/video/search?search=${q}&page=${page + 1}`;
+    case "fpo":
+      return page <= 0
+        ? `https://www.fpo.xxx/search/${q}/`
+        : `https://www.fpo.xxx/search/${q}/${page + 1}/`;
+    case "eporner":
+      return page <= 0
+        ? `https://www.eporner.com/search/${q}/`
+        : `https://www.eporner.com/search/${q}/${page + 1}/`;
+    case "playvids":
+      return page <= 0
+        ? `https://www.playvids.com/search?q=${q}`
+        : `https://www.playvids.com/search?q=${q}&page=${page + 1}`;
+    default:
+      return SEARCH_SOURCES[key]?.url(query) || "";
+  }
 }
 
 const SEARCH_SOURCES: Record<
@@ -264,13 +295,14 @@ export const SEARCH_SOURCE_KEYS = Object.keys(SEARCH_SOURCES);
 export async function searchActorVideos(
   actorName: string,
   sources?: string[],
-  limitPerSource = 24
+  limitPerSource = 0
 ): Promise<{ results: SearchResult[]; log: string[] }> {
   const actor = (actorName || "").trim();
   const log: string[] = [];
   if (!actor) throw new Error("Actor name is required");
 
-  const limit = Math.max(1, Math.min(60, limitPerSource));
+  const unlimited = !limitPerSource || limitPerSource <= 0;
+  const cap = unlimited ? 0 : Math.max(1, limitPerSource);
   const chosen = (sources?.length ? sources : SEARCH_SOURCE_KEYS).filter(
     (k) => k in SEARCH_SOURCES
   );
@@ -280,19 +312,37 @@ export async function searchActorVideos(
 
   for (const key of chosen) {
     const source = SEARCH_SOURCES[key];
-    const searchUrl = source.url(actor);
     log.push(`Searching ${source.label}…`);
     try {
-      const html = await fetchHtml(searchUrl);
-      const found = source.parse(html, limit);
-      let added = 0;
-      for (const item of found) {
-        if (!item.url || seen.has(item.url)) continue;
-        seen.add(item.url);
-        results.push({ ...item, actor });
-        added += 1;
+      let sourceTotal = 0;
+      let page = 0;
+      while (true) {
+        const searchUrl = searchPageUrl(key, actor, page);
+        if (!searchUrl) break;
+        const html = await fetchHtml(searchUrl);
+        const remaining = unlimited ? 0 : Math.max(0, cap - sourceTotal);
+        const found = source.parse(html, remaining);
+        if (!found.length) {
+          if (page === 0) log.push(`  ${source.label}: 0 result(s)`);
+          break;
+        }
+
+        let added = 0;
+        for (const item of found) {
+          if (!item.url || seen.has(item.url)) continue;
+          seen.add(item.url);
+          results.push({ ...item, actor });
+          added += 1;
+          sourceTotal += 1;
+          if (!unlimited && sourceTotal >= cap) break;
+        }
+
+        log.push(
+          `  ${source.label} page ${page + 1}: +${added} (total ${sourceTotal})`
+        );
+        if (!unlimited && sourceTotal >= cap) break;
+        page += 1;
       }
-      log.push(`  ${source.label}: ${added} result(s)`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.push(`  ${source.label} failed: ${msg}`);
