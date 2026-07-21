@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/PageHeader";
 import { ModelCard } from "@/components/ModelCard";
@@ -136,9 +137,9 @@ export function ModelsCatalog({ site, title, subtitle }: ModelsCatalogProps) {
             ) : (
               <p className="mt-10 text-center text-sm text-cinema-muted">
                 No models found yet.{" "}
-                <a href="/" className="text-cinema-accent hover:underline">
+                <Link href="/" className="text-cinema-accent hover:underline">
                   Search online
-                </a>{" "}
+                </Link>{" "}
                 to import the first one.
               </p>
             )}
