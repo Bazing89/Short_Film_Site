@@ -44,6 +44,20 @@ function decodeHtmlEntities(text: string): string {
     );
 }
 
+export function hasModelPoster(
+  record: Pick<SiteModelRecord, "poster">
+): boolean {
+  return Boolean((record.poster || "").trim());
+}
+
+/** Drop model entries that have no usable photo. */
+export function filterModelsWithPosters(
+  records: SiteModelRecord[]
+): { kept: SiteModelRecord[]; removed: number } {
+  const kept = records.filter(hasModelPoster);
+  return { kept, removed: records.length - kept.length };
+}
+
 export function modelSlugFromName(name: string): string {
   const slug = (name || "")
     .toLowerCase()
@@ -104,6 +118,7 @@ export function mergeModelRecords(
   const merged: SiteModelRecord[] = [];
 
   for (const record of existing) {
+    if (!hasModelPoster(record)) continue;
     for (const k of modelRecordKeys(record)) seenKeys.add(k);
     merged.push(record);
   }
@@ -118,17 +133,22 @@ export function mergeModelRecords(
     const profileUrl = profileRaw
       ? profileRaw.replace(/\/+$/, "") + "/"
       : "";
+    const poster = (item.poster || "").trim();
     const record: SiteModelRecord = {
       id: profileUrl
         ? modelIdForProfile(profileUrl, name)
         : modelSlugFromName(name),
       name,
       slug: modelSlugFromName(name),
-      poster: (item.poster || "").trim(),
+      poster,
       profileUrl: profileUrl || undefined,
       sourceSite: (item.sourceSite || "").trim() || undefined,
       dateAdded: now,
     };
+    if (!poster) {
+      skipped += 1;
+      continue;
+    }
     const keys = modelRecordKeys(record);
     let overlap = false;
     for (const k of keys) {
@@ -580,7 +600,8 @@ export async function saveSiteModels(
   records: SiteModelRecord[]
 ): Promise<boolean> {
   if (!env.OUTBOUND) return false;
-  await env.OUTBOUND.put(MODELS_KV_KEY, JSON.stringify(records));
+  const { kept } = filterModelsWithPosters(records);
+  await env.OUTBOUND.put(MODELS_KV_KEY, JSON.stringify(kept));
   return true;
 }
 
@@ -623,6 +644,7 @@ export async function scrapeModelsListing(
   const seenKeys = new Set<string>();
 
   const remember = (item: ScrapedModel): boolean => {
+    if (!hasModelPoster({ poster: item.poster || "" })) return false;
     const keys = modelItemDedupeKeys(item);
     for (const k of keys) {
       if (seenKeys.has(k)) {
@@ -785,23 +807,29 @@ export async function importModelsFromUrl(
   }
   const now = new Date().toISOString();
   const { merged, added, skipped, updated } = mergeModelRecords(
-    existing,
+    existing.filter(hasModelPoster),
     scraped,
     now
   );
-  const synced = await saveSiteModels(env, merged);
+  const purged = filterModelsWithPosters(merged);
+  const synced = await saveSiteModels(env, purged.kept);
+  if (purged.removed > 0) {
+    log.push(
+      `  Removed ${purged.removed} model(s) with no photo from catalog.`
+    );
+  }
   log.push(
-    `Saved ${merged.length} model(s) to KV (+${added} new, ${updated} photos updated, ${skipped} unchanged)`
+    `Saved ${purged.kept.length} model(s) to KV (+${added} new, ${updated} photos updated, ${skipped} unchanged)`
   );
   return {
     added,
     skipped,
     updated,
     scraped: scraped.length,
-    total: merged.length,
+    total: purged.kept.length,
     synced,
     sourceUrl: normalized,
-    models: merged,
+    models: purged.kept,
     log,
   };
 }
@@ -882,77 +910,30 @@ export async function importModelsFromHtml(
 
   const now = new Date().toISOString();
   const { merged, added, skipped, updated } = mergeModelRecords(
-    existing,
+    existing.filter(hasModelPoster),
     scraped,
     now
   );
-  const synced = await saveSiteModels(env, merged);
+  const purged = filterModelsWithPosters(merged);
+  const synced = await saveSiteModels(env, purged.kept);
   log.push(`Parsed ${scraped.length} model(s) from pasted HTML`);
+  if (purged.removed > 0) {
+    log.push(
+      `  Removed ${purged.removed} model(s) with no photo from catalog.`
+    );
+  }
   log.push(
-    `Saved ${merged.length} model(s) to KV (+${added} new, ${updated} photos updated, ${skipped} unchanged)`
+    `Saved ${purged.kept.length} model(s) to KV (+${added} new, ${updated} photos updated, ${skipped} unchanged)`
   );
   return {
     added,
     skipped,
     updated,
     scraped: scraped.length,
-    total: merged.length,
+    total: purged.kept.length,
     synced,
     sourceUrl: normalized,
-    models: merged,
+    models: purged.kept,
     log,
   };
-}
-
-export async function upsertModelFromActorSearch(
-  env: KvEnv,
-  actorName: string,
-  results: Array<{ url?: string; poster?: string; site?: string; error?: boolean }>,
-  existing: SiteModelRecord[]
-): Promise<{ added: number; skipped: number; total: number; models: SiteModelRecord[]; log: string[] }> {
-  const log: string[] = [];
-  const actor = (actorName || "").trim();
-  const valid = results.filter((r) => r.url && !r.error);
-  if (!actor || !valid.length) {
-    return { added: 0, skipped: 0, total: existing.length, models: existing, log };
-  }
-
-  let poster = "";
-  for (const r of valid) {
-    if (r.poster) {
-      poster = r.poster;
-      break;
-    }
-  }
-  const sites = [
-    ...new Set(
-      valid.map((r) => (r.site || "").trim()).filter(Boolean)
-    ),
-  ].sort();
-  const item: ScrapedModel = {
-    name: actor,
-    poster,
-    profileUrl: "",
-    sourceSite: sites.length === 1 ? sites[0] : sites.join(","),
-  };
-
-  const now = new Date().toISOString();
-  const { merged, added, skipped, updated } = mergeModelRecords(
-    existing,
-    [item],
-    now
-  );
-  await saveSiteModels(env, merged);
-  if (added) {
-    log.push(
-      poster
-        ? `Added model “${actor}” with thumbnail to site Models page.`
-        : `Added model “${actor}” to site Models page (no thumbnail found).`
-    );
-  } else if (updated) {
-    log.push(`Updated model “${actor}” photo on site Models page.`);
-  } else if (skipped) {
-    log.push(`Model “${actor}” already on site Models page.`);
-  }
-  return { added, skipped, total: merged.length, models: merged, log };
 }

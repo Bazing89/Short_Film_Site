@@ -29,7 +29,7 @@ Opens http://127.0.0.1:8765
 
 (You can still run `python3 python-script/ui.py` without the venv; Indexxx auto-fetch may fail behind Cloudflare — use **Paste page HTML** in that case.)
 
-1. Enter an **actor name** and search XVideos / XNXX / Pornhub / MyFPO (fpo.xxx) / Eporner / Playvids — the actor is auto-pushed to the site **Models** page when videos are found  
+1. Enter an **actor name** and search XVideos / XNXX / Pornhub / MyFPO (fpo.xxx) / Eporner / Playvids  
 2. Select videos from the results list  
 3. Choose one:
    - **Publish as links** — adds title + thumbnail to the site catalog; viewers hit an ad page then go to the source site (fast, no download)

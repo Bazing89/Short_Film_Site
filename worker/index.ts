@@ -22,12 +22,12 @@ import {
 } from "./catalog-sync";
 import {
   DEFAULT_MODELS_URL,
+  filterModelsWithPosters,
   importModelsFromHtml,
   importModelsFromUrl,
   loadSiteModelsFromKv,
   saveSiteModels,
   setModelsImportStop,
-  upsertModelFromActorSearch,
   type SiteModelRecord as ImportSiteModel,
 } from "./models-import";
 import { searchActorVideos } from "./search";
@@ -549,27 +549,7 @@ async function handlePublicModelSearch(
       }
     });
     const withPosters = valid.filter((r) => (r.poster || "").trim());
-
-    let modelsCount = 0;
-    if (withPosters.length && env.OUTBOUND) {
-      let existingModels = await loadSiteModelsFromKv(env);
-      if (existingModels.length === 0) {
-        existingModels = (await loadSiteModels(
-          request,
-          env
-        )) as ImportSiteModel[];
-      }
-      const upsert = await upsertModelFromActorSearch(
-        env,
-        model,
-        withPosters,
-        existingModels
-      );
-      modelsCount = upsert.total;
-      log.push(...upsert.log);
-    } else {
-      modelsCount = (await loadSiteModels(request, env)).length;
-    }
+    const modelsCount = (await loadSiteModels(request, env)).length;
 
     return jsonFresh({
       ok: true,
@@ -629,23 +609,6 @@ async function handlePublicModelImport(
 
   const published = await mergeAndPublishOutbound(request, env, records, false);
 
-  if (model && env.OUTBOUND) {
-    let existingModels = await loadSiteModelsFromKv(env);
-    if (existingModels.length === 0) {
-      existingModels = (await loadSiteModels(request, env)) as ImportSiteModel[];
-    }
-    await upsertModelFromActorSearch(
-      env,
-      model,
-      items.map((i) => ({
-        url: i.url,
-        poster: i.poster,
-        site: i.site,
-      })),
-      existingModels
-    );
-  }
-
   return json(
     {
       ok: published.persisted,
@@ -695,25 +658,41 @@ async function loadSiteModels(
   request: Request,
   env: Env
 ): Promise<SiteModelRecord[]> {
+  let records: SiteModelRecord[] = [];
   if (env.OUTBOUND) {
     try {
       const raw = await env.OUTBOUND.get(MODELS_KV_KEY);
       if (raw) {
         const data = JSON.parse(raw) as unknown;
-        if (Array.isArray(data)) return data as SiteModelRecord[];
+        if (Array.isArray(data)) records = data as SiteModelRecord[];
       }
-      const legacy = await env.OUTBOUND.get("bop-models");
-      if (legacy) {
-        const data = JSON.parse(legacy) as unknown;
-        if (Array.isArray(data)) return data as SiteModelRecord[];
+      if (!records.length) {
+        const legacy = await env.OUTBOUND.get("bop-models");
+        if (legacy) {
+          const data = JSON.parse(legacy) as unknown;
+          if (Array.isArray(data)) records = data as SiteModelRecord[];
+        }
       }
     } catch {
       // fall through to assets
     }
   }
-  const models = await loadSiteModelsFromAssets(request, env);
-  if (models.length > 0) return models;
-  return loadLegacyBopModelsFromAssets(request, env);
+  if (!records.length) {
+    records = await loadSiteModelsFromAssets(request, env);
+  }
+  if (!records.length) {
+    records = await loadLegacyBopModelsFromAssets(request, env);
+  }
+
+  const { kept, removed } = filterModelsWithPosters(records);
+  if (removed > 0 && env.OUTBOUND) {
+    try {
+      await saveSiteModels(env, kept);
+    } catch {
+      /* ignore write errors on read path */
+    }
+  }
+  return kept;
 }
 
 function outboundIdFromUrl(sourceUrl: string): string {
@@ -1193,33 +1172,13 @@ async function handleAdminApi(
         }
       });
       const withPosters = valid.filter((r) => (r.poster || "").trim());
-      let modelLog: string[] = [];
-      let modelsCount = 0;
-      if (withPosters.length && env.OUTBOUND) {
-        let existingModels = await loadSiteModelsFromKv(env);
-        if (existingModels.length === 0) {
-          existingModels = (await loadSiteModels(
-            request,
-            env
-          )) as ImportSiteModel[];
-        }
-        const upsert = await upsertModelFromActorSearch(
-          env,
-          actor,
-          withPosters,
-          existingModels
-        );
-        modelLog = upsert.log;
-        modelsCount = upsert.total;
-      } else {
-        modelsCount = (await loadSiteModels(request, env)).length;
-      }
+      const modelsCount = (await loadSiteModels(request, env)).length;
       return jsonFresh({
         ok: true,
         actor,
         count: withPosters.length,
         results: withPosters,
-        log: [...log, ...modelLog],
+        log,
         modelsCount,
       });
     } catch (err) {

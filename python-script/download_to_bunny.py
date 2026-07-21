@@ -738,25 +738,6 @@ def enrich_search_results_with_posters(
     return enriched
 
 
-def _best_poster_for_search_results(
-    results: list[dict],
-    log: LogFn = print,
-) -> str:
-    for item in results:
-        poster = str(item.get("poster") or "").strip()
-        if poster:
-            return poster
-    for item in results[:8]:
-        url = str(item.get("url") or "").strip()
-        if not url:
-            continue
-        poster = fetch_poster_from_page(url)
-        if poster:
-            log(f"  Pulled model thumbnail from video page.")
-            return poster
-    return ""
-
-
 def _admin_request_json(
     site: str,
     path: str,
@@ -1171,6 +1152,15 @@ def _model_record_keys(record: dict) -> set[str]:
     return keys
 
 
+def has_model_poster(record: dict) -> bool:
+    return bool(str(record.get("poster") or "").strip())
+
+
+def filter_models_with_posters(records: list[dict]) -> tuple[list[dict], int]:
+    kept = [r for r in records if has_model_poster(r)]
+    return kept, len(records) - len(kept)
+
+
 def load_site_models() -> list[dict]:
     for path in (MODELS_PUBLIC, MODELS_OUT, LEGACY_BOP_MODELS_PUBLIC, LEGACY_BOP_MODELS_OUT):
         if not path.exists():
@@ -1180,12 +1170,16 @@ def load_site_models() -> list[dict]:
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(data, list):
-            return data
+            kept, removed = filter_models_with_posters(data)
+            if removed:
+                save_site_models(kept)
+            return kept
     return []
 
 
 def save_site_models(records: list[dict]) -> None:
-    payload = json.dumps(records, indent=2, ensure_ascii=False) + "\n"
+    cleaned, _ = filter_models_with_posters(records)
+    payload = json.dumps(cleaned, indent=2, ensure_ascii=False) + "\n"
     MODELS_PUBLIC.parent.mkdir(parents=True, exist_ok=True)
     MODELS_PUBLIC.write_text(payload, encoding="utf-8")
     if MODELS_OUT.parent.exists():
@@ -1193,6 +1187,9 @@ def save_site_models(records: list[dict]) -> None:
 
 
 def sync_site_models_to_live_site(models: list[dict], log: LogFn = print) -> dict:
+    models, removed = filter_models_with_posters(models)
+    if removed:
+        log(f"  Dropped {removed} model(s) without photos before KV sync.")
     tmp_path = HERE / ".models-sync.json"
     try:
         tmp_path.write_text(json.dumps(models, ensure_ascii=False), encoding="utf-8")
@@ -1266,6 +1263,8 @@ def _merge_model_records(
     merged: list[dict] = []
 
     for record in existing:
+        if not has_model_poster(record):
+            continue
         seen_keys.update(_model_record_keys(record))
         merged.append(record)
 
@@ -1273,10 +1272,16 @@ def _merge_model_records(
     skipped = 0
     for item in scraped:
         name = str(item.get("name") or "").strip()
+        if not name:
+            continue
         profile_raw = str(item.get("profileUrl") or "").strip()
         profile_url = (
             profile_raw.rstrip("/") + "/" if profile_raw else ""
         )
+        poster = str(item.get("poster") or "").strip()
+        if not poster:
+            skipped += 1
+            continue
         record = {
             "id": (
                 model_id_for_profile(profile_url, name)
@@ -1285,7 +1290,7 @@ def _merge_model_records(
             ),
             "name": name,
             "slug": model_slug_from_name(name),
-            "poster": str(item.get("poster") or "").strip(),
+            "poster": poster,
             "profileUrl": profile_url,
             "sourceSite": str(item.get("sourceSite") or "").strip(),
             "dateAdded": now,
@@ -1298,6 +1303,8 @@ def _merge_model_records(
                     updated = dict(existing)
                     if record.get("poster"):
                         updated["poster"] = record["poster"]
+                    if record.get("profileUrl"):
+                        updated["profileUrl"] = record["profileUrl"]
                     if record.get("sourceSite") and not str(
                         updated.get("sourceSite") or ""
                     ).strip():
@@ -1311,69 +1318,6 @@ def _merge_model_records(
 
     merged.sort(key=lambda r: str(r.get("name") or "").lower())
     return merged, added, skipped
-
-
-def _model_record_from_actor_search(
-    actor: str, results: list[dict], log: LogFn = print
-) -> dict:
-    poster = _best_poster_for_search_results(results, log=log)
-    sites = sorted(
-        {
-            str(r.get("site") or "").strip()
-            for r in results
-            if str(r.get("site") or "").strip()
-        }
-    )
-    slug = model_slug_from_name(actor)
-    return {
-        "name": actor,
-        "slug": slug,
-        "poster": poster,
-        "profileUrl": "",
-        "sourceSite": sites[0] if len(sites) == 1 else ",".join(sites),
-        "id": slug,
-    }
-
-
-def upsert_model_from_actor_search(
-    actor_name: str,
-    results: list[dict],
-    log: LogFn = print,
-) -> dict:
-    """After an actor search, add/update that performer on the site Models page."""
-    actor = (actor_name or "").strip()
-    valid = [r for r in results if r.get("url") and not r.get("error")]
-    if not actor or not valid:
-        return {"added": 0, "skipped": 0, "total": len(load_site_models())}
-
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    item = _model_record_from_actor_search(actor, valid, log=log)
-    merged, added, skipped = _merge_model_records(load_site_models(), [item], now)
-    save_site_models(merged)
-    if added:
-        if item.get("poster"):
-            log(f"  Added model “{actor}” with thumbnail to site Models page.")
-        else:
-            log(f"  Added model “{actor}” to site Models page (no thumbnail found).")
-    elif skipped:
-        if item.get("poster"):
-            log(f"  Updated model “{actor}” thumbnail on site Models page.")
-        else:
-            log(f"  Model “{actor}” already on site Models page.")
-
-    sync = sync_site_models_to_live_site(merged, log=log)
-    if sync.get("ok"):
-        log("  Models live on site (KV).")
-    elif sync.get("error"):
-        log(f"  KV sync skipped/failed: {sync.get('error')}")
-
-    return {
-        "added": added,
-        "skipped": skipped,
-        "total": len(merged),
-        "synced": bool(sync.get("ok")),
-        "sync": sync,
-    }
 
 
 def _parse_fpo_models_page(html: str, limit: int) -> list[dict]:
@@ -1763,6 +1707,8 @@ def scrape_models_listing(
     seen_keys: set[str] = set()
 
     def remember_item(item: dict) -> bool:
+        if not has_model_poster(item):
+            return False
         keys = _model_item_dedupe_keys(item)
         if keys & seen_keys:
             # Prefer keeping/updating poster if a later page has one

@@ -787,7 +787,7 @@ export function AdminPanel() {
             ))}
           </div>
           <p className="text-sm text-cinema-muted">
-            Actor is auto-added to Models when videos are found. Publish as
+            Actor search imports videos only — use Import models for photos. Publish as
             links = thumbnail + ad redirect (no download).
           </p>
           <div className="flex flex-wrap gap-2">

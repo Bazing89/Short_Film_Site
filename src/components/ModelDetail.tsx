@@ -49,27 +49,18 @@ function ModelDetailContent() {
           });
           const summary = siteRecordToSummary(imported);
           setName(summary.name);
-          setPoster(summary.poster || result.model?.poster || "");
+          setPoster(summary.poster);
           setVideoCount(result.films.length);
           setFilms(result.films);
           setError("");
           return;
         }
 
-        const result = getFilmsForModel(all, slug, site ? { site } : undefined);
-        if (!result.model) {
-          setError("Model not found");
-          setName("");
-          setPoster("");
-          setVideoCount(0);
-          setFilms([]);
-        } else {
-          setName(result.model.name);
-          setPoster(result.model.poster);
-          setVideoCount(result.model.videoCount);
-          setFilms(result.films);
-          setError("");
-        }
+        setError("Model not found");
+        setName("");
+        setPoster("");
+        setVideoCount(0);
+        setFilms([]);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load model");

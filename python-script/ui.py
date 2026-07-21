@@ -194,8 +194,6 @@ def _run_search(actor: str, sources: list[str], limit: int) -> None:
         )
         results = bunny.enrich_search_results_with_posters(results, log=_append_log)
         valid = [r for r in results if r.get("url") and not r.get("error")]
-        if valid:
-            bunny.upsert_model_from_actor_search(actor, valid, log=_append_log)
         with _state_lock:
             _search_results = results
             _search_error = "" if results else "No videos found for that name."
@@ -796,7 +794,7 @@ PAGE = r"""<!DOCTYPE html>
           <button class="btn-primary" id="searchBtn" type="button">Search</button>
         </div>
         <div class="sources" id="sources"></div>
-        <p class="hint">Searches selected sites. The actor is auto-added to the site <strong>Models</strong> page when results are found. <strong>Publish as links</strong> = show on site with thumbnail + ad redirect (fast). <strong>Queue selected</strong> + Start = download into Bunny.</p>
+        <p class="hint">Searches selected sites. Model photos are added via <strong>Import models</strong> only — video search does not change model pictures. <strong>Publish as links</strong> = show on site with thumbnail + ad redirect (fast). <strong>Queue selected</strong> + Start = download into Bunny.</p>
 
         <div class="actions" style="margin-top: 0.85rem;">
           <button class="btn-secondary" id="selectAllBtn" type="button">Select all</button>
