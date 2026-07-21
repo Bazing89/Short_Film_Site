@@ -1,4 +1,5 @@
-import { type ModelSummary } from "@/data/models";
+import { getFilmsForModel, type ModelSummary } from "@/data/models";
+import type { Film } from "@/data/films";
 
 export interface SiteModelRecord {
   id: string;
@@ -51,7 +52,8 @@ function normalizeName(name: string): string {
 /** Merge imported model photos with video counts from the catalog. Photos come only from model import. */
 export function mergeImportedAndFilmModels(
   imported: SiteModelRecord[],
-  fromFilms: ModelSummary[]
+  fromFilms: ModelSummary[],
+  films?: Film[]
 ): ModelSummary[] {
   const bySlug = new Map<string, ModelSummary>();
   const filmCountBySlug = new Map(
@@ -66,8 +68,10 @@ export function mergeImportedAndFilmModels(
     const summary = siteRecordToSummary(record);
     const slugKey = summary.slug.toLowerCase();
     const nameKey = normalizeName(summary.name);
-    summary.videoCount =
-      filmCountBySlug.get(slugKey) ?? filmCountByName.get(nameKey) ?? 0;
+    summary.videoCount = films
+      ? getFilmsForModel(films, summary.slug, { modelName: summary.name })
+          .films.length
+      : filmCountBySlug.get(slugKey) ?? filmCountByName.get(nameKey) ?? 0;
     bySlug.set(slugKey, summary);
   }
 

@@ -26,6 +26,7 @@ import {
   importModelsFromHtml,
   importModelsFromUrl,
   loadSiteModelsFromKv,
+  modelSlugFromName,
   saveSiteModels,
   setModelsImportStop,
   type SiteModelRecord as ImportSiteModel,
@@ -1510,6 +1511,36 @@ async function listAllFilms(request: Request, env: Env): Promise<Film[]> {
   return [...bunnyFilms, ...outboundFilms];
 }
 
+type ModelSeoEntry = { slug: string; name: string };
+
+function rememberModelSeoEntry(
+  bySlug: Map<string, string>,
+  name: string,
+  slug?: string
+): void {
+  const trimmed = (name || "").trim();
+  if (!trimmed) return;
+  const key = (slug || modelSlugFromName(trimmed)).toLowerCase();
+  if (!key || key === "model") return;
+  if (!bySlug.has(key)) bySlug.set(key, trimmed);
+}
+
+async function collectModelSeoEntries(
+  request: Request,
+  env: Env
+): Promise<ModelSeoEntry[]> {
+  const bySlug = new Map<string, string>();
+  for (const model of await loadSiteModels(request, env)) {
+    rememberModelSeoEntry(bySlug, model.name, model.slug);
+  }
+  for (const record of await loadOutboundFilms(request, env)) {
+    if (record.actor) rememberModelSeoEntry(bySlug, record.actor);
+  }
+  return [...bySlug.entries()]
+    .map(([slug, name]) => ({ slug, name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function renderWatchPageHtml(film: Film, origin: string): string {
   const id = film.streamId || film.slug;
   const path = filmWatchPath(film);
@@ -1620,7 +1651,11 @@ function renderWatchPageHtml(film: Film, origin: string): string {
 </html>`;
 }
 
-function renderSitemapXml(films: Film[], origin: string): string {
+function renderSitemapXml(
+  films: Film[],
+  modelEntries: ModelSeoEntry[],
+  origin: string
+): string {
   const urls = films
     .map((film) => {
       const loc = `${origin}${filmWatchPath(film)}`;
@@ -1635,8 +1670,29 @@ function renderSitemapXml(films: Film[], origin: string): string {
     })
     .join("\n");
 
+  const modelSearchUrls = modelEntries
+    .map(
+      (entry) => `  <url>
+    <loc>${escapeHtml(origin)}/search/${encodeURIComponent(entry.slug)}</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.75</priority>
+  </url>`
+    )
+    .join("\n");
+
+  const modelProfileUrls = modelEntries
+    .map(
+      (entry) => `  <url>
+    <loc>${escapeHtml(origin)}/models/${encodeURIComponent(entry.slug)}</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.7</priority>
+  </url>`
+    )
+    .join("\n");
+
   const staticPages = [
     { path: "/", changefreq: "daily", priority: "1.0" },
+    { path: "/search", changefreq: "daily", priority: "0.95" },
     { path: "/films", changefreq: "daily", priority: "0.9" },
     { path: "/videos", changefreq: "daily", priority: "0.9" },
     { path: "/models", changefreq: "daily", priority: "0.8" },
@@ -1656,6 +1712,8 @@ function renderSitemapXml(films: Film[], origin: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 ${staticPages}
+${modelSearchUrls}
+${modelProfileUrls}
 ${urls}
 </urlset>`;
 }
@@ -1745,8 +1803,11 @@ export default {
 
       if (url.pathname === "/sitemap.xml") {
         try {
-          const films = await listAllFilms(request, env);
-          return new Response(renderSitemapXml(films, origin), {
+          const [films, modelEntries] = await Promise.all([
+            listAllFilms(request, env),
+            collectModelSeoEntries(request, env),
+          ]);
+          return new Response(renderSitemapXml(films, modelEntries, origin), {
             headers: {
               "content-type": "application/xml; charset=utf-8",
               "cache-control": "public, max-age=300",
@@ -1755,6 +1816,19 @@ export default {
         } catch (err) {
           const message = err instanceof Error ? err.message : "Sitemap error";
           return new Response(`Sitemap error: ${message}`, { status: 500 });
+        }
+      }
+
+      // Legacy model URLs: /model?slug=… → /models/{slug}
+      if (url.pathname === "/model" && url.searchParams.get("slug")) {
+        const slug = (url.searchParams.get("slug") || "").trim().toLowerCase();
+        if (slug) {
+          const site = url.searchParams.get("site");
+          const target =
+            site === "fpo"
+              ? `/models/${encodeURIComponent(slug)}?site=fpo`
+              : `/models/${encodeURIComponent(slug)}`;
+          return Response.redirect(`${origin}${target}`, 301);
         }
       }
 

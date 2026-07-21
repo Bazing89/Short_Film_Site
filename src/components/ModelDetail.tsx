@@ -1,16 +1,21 @@
 "use client";
 
+import { useParams, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import { BackLink } from "@/components/PageHeader";
 import { VideoCard } from "@/components/VideoCard";
 import { getFilmsForModel } from "@/data/models";
 import { fetchFilms } from "@/lib/filmsApi";
 import { fetchSiteModels, siteRecordToSummary } from "@/lib/siteModelsApi";
 
-function ModelDetailContent() {
+function ModelDetailContent({ slugFromRoute = "" }: { slugFromRoute?: string }) {
+  const params = useParams();
   const searchParams = useSearchParams();
-  const slug = searchParams.get("slug") || "";
+  const slug =
+    slugFromRoute ||
+    (typeof params?.slug === "string" ? params.slug : "") ||
+    searchParams.get("slug") ||
+    "";
   const site = searchParams.get("site") === "fpo" ? "fpo" : undefined;
   const backHref = site === "fpo" ? "/bop-models" : "/models";
   const [loading, setLoading] = useState(true);
@@ -143,7 +148,7 @@ function ModelDetailContent() {
   );
 }
 
-export function ModelDetail() {
+export function ModelDetail({ slugFromRoute = "" }: { slugFromRoute?: string }) {
   return (
     <Suspense
       fallback={
@@ -152,7 +157,7 @@ export function ModelDetail() {
         </p>
       }
     >
-      <ModelDetailContent />
+      <ModelDetailContent slugFromRoute={slugFromRoute} />
     </Suspense>
   );
 }

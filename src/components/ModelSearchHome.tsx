@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ModelCard } from "@/components/ModelCard";
 import { VideoCard } from "@/components/VideoCard";
 import {
@@ -56,8 +56,14 @@ function libraryUrlSet(films: ReturnType<typeof getFilmsForModel>["films"]): Set
   return urls;
 }
 
-export function ModelSearchHome() {
-  const [query, setQuery] = useState("");
+export function ModelSearchHome({
+  initialQuery = "",
+  autoSearch = false,
+}: {
+  initialQuery?: string;
+  autoSearch?: boolean;
+} = {}) {
+  const [query, setQuery] = useState(initialQuery);
   const [activeModel, setActiveModel] = useState("");
   const [sources, setSources] = useState<string[]>([...SEARCH_SOURCES]);
   const [searching, setSearching] = useState(false);
@@ -84,7 +90,7 @@ export function ModelSearchHome() {
         ]);
         if (!cancelled) {
           const fromFilms = deriveModels(films);
-          const merged = mergeImportedAndFilmModels(imported, fromFilms);
+          const merged = mergeImportedAndFilmModels(imported, fromFilms, films);
           setPopularModels(merged.slice(0, 12));
         }
       } catch {
@@ -111,53 +117,82 @@ export function ModelSearchHome() {
     }
   }, []);
 
+  const autoSearchRan = useRef(false);
+
+  useEffect(() => {
+    if (initialQuery) setQuery(initialQuery);
+  }, [initialQuery]);
+
+  const runSearch = useCallback(
+    async (name: string) => {
+      if (name.length < 2) {
+        setSearchError("Enter a model name (at least 2 characters)");
+        return;
+      }
+      if (sources.length === 0) {
+        setSearchError("Select at least one site to search");
+        return;
+      }
+
+      setSearching(true);
+      setSearchError("");
+      setImportMessage("");
+      setResults([]);
+      setSelected(new Set());
+      setLibraryFilms([]);
+      setHasSearched(true);
+      setActiveModel(name);
+
+      try {
+        const [data, allFilms] = await Promise.all([
+          searchModelOnline(name, sources),
+          fetchFilms(),
+        ]);
+        const slug = modelSlug(name);
+        const { films: matched } = getFilmsForModel(allFilms, slug, {
+          modelName: name,
+        });
+        setLibraryFilms(matched);
+
+        const alreadyInLibrary = libraryUrlSet(matched);
+        const list = (data.results ?? []).filter(
+          (r) =>
+            r.url &&
+            !r.error &&
+            (r.poster || "").trim() &&
+            !alreadyInLibrary.has(normalizeVideoUrl(r.url))
+        );
+        setResults(list);
+        setSelected(new Set(list.map((r) => r.url)));
+      } catch (err) {
+        setSearchError(err instanceof Error ? err.message : "Search failed");
+      } finally {
+        setSearching(false);
+      }
+    },
+    [sources]
+  );
+
+  useEffect(() => {
+    if (!autoSearch || autoSearchRan.current) return;
+    if (!initialQuery || initialQuery.length < 2) return;
+    autoSearchRan.current = true;
+    void runSearch(initialQuery.trim());
+  }, [autoSearch, initialQuery, runSearch]);
+
+  useEffect(() => {
+    if (initialQuery || typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const q = (params.get("q") || params.get("model") || "").trim();
+    if (q.length >= 2) {
+      setQuery(q);
+      void runSearch(q);
+    }
+  }, [initialQuery, runSearch]);
+
   async function handleSearch(e?: React.FormEvent) {
     e?.preventDefault();
-    const name = query.trim();
-    if (name.length < 2) {
-      setSearchError("Enter a model name (at least 2 characters)");
-      return;
-    }
-    if (sources.length === 0) {
-      setSearchError("Select at least one site to search");
-      return;
-    }
-
-    setSearching(true);
-    setSearchError("");
-    setImportMessage("");
-    setResults([]);
-    setSelected(new Set());
-    setLibraryFilms([]);
-    setHasSearched(true);
-    setActiveModel(name);
-
-    try {
-      const [data, allFilms] = await Promise.all([
-        searchModelOnline(name, sources),
-        fetchFilms(),
-      ]);
-      const slug = modelSlug(name);
-      const { films: matched } = getFilmsForModel(allFilms, slug, {
-        modelName: name,
-      });
-      setLibraryFilms(matched);
-
-      const alreadyInLibrary = libraryUrlSet(matched);
-      const list = (data.results ?? []).filter(
-        (r) =>
-          r.url &&
-          !r.error &&
-          (r.poster || "").trim() &&
-          !alreadyInLibrary.has(normalizeVideoUrl(r.url))
-      );
-      setResults(list);
-      setSelected(new Set(list.map((r) => r.url)));
-    } catch (err) {
-      setSearchError(err instanceof Error ? err.message : "Search failed");
-    } finally {
-      setSearching(false);
-    }
+    await runSearch(query.trim());
   }
 
   async function handleImport() {
@@ -526,6 +561,9 @@ export function ModelSearchHome() {
 
         {/* Quick links */}
         <div className="mt-12 flex flex-wrap justify-center gap-3">
+          <Link href="/search" className="nav-pill">
+            Model search tool
+          </Link>
           <Link href="/videos" className="nav-pill">
             Browse video library
           </Link>

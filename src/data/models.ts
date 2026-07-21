@@ -15,9 +15,9 @@ export function modelSlug(name: string): string {
 export function modelDetailPath(name: string, site?: "fpo"): string {
   const slug = modelSlug(name);
   if (site === "fpo") {
-    return `/model?slug=${encodeURIComponent(slug)}&site=fpo`;
+    return `/models/${encodeURIComponent(slug)}?site=fpo`;
   }
-  return `/model?slug=${encodeURIComponent(slug)}`;
+  return `/models/${encodeURIComponent(slug)}`;
 }
 
 function normalizeModelName(name: string): string {
@@ -27,25 +27,13 @@ function normalizeModelName(name: string): string {
 export function filmMatchesModel(
   film: Film,
   modelName: string,
-  slug: string
+  _slug?: string
 ): boolean {
-  const normalizedSlug = slug.toLowerCase();
   const normalizedName = normalizeModelName(modelName);
-  const actor = filmActor(film);
+  if (!normalizedName) return false;
 
-  if (actor) {
-    if (modelSlug(actor).toLowerCase() === normalizedSlug) return true;
-    if (normalizeModelName(actor) === normalizedName) return true;
-  }
-
-  if (normalizedName) {
-    const haystack = normalizeModelName(
-      [film.title, film.description, film.synopsis].join(" ")
-    );
-    if (haystack.includes(normalizedName)) return true;
-  }
-
-  return false;
+  const title = normalizeModelName(film.title);
+  return title.includes(normalizedName);
 }
 
 function filmActor(film: Film): string {
@@ -114,14 +102,10 @@ export function getFilmsForModel(
   options?: { site?: string; modelName?: string }
 ): { model: ModelSummary | null; films: Film[] } {
   const { site, modelName } = options ?? {};
-  const normalized = slug.toLowerCase();
   const matched = films.filter((film) => {
     if (site && film.site !== site && film.genre !== site) return false;
-    if (modelName) {
-      return filmMatchesModel(film, modelName, slug);
-    }
-    const actor = filmActor(film);
-    return Boolean(actor && modelSlug(actor).toLowerCase() === normalized);
+    if (!modelName) return false;
+    return filmMatchesModel(film, modelName, slug);
   });
 
   if (matched.length === 0) {

@@ -23,6 +23,12 @@ export function Footer() {
               Search
             </Link>
             <Link
+              href="/search"
+              className="text-sm text-cinema-muted transition-colors hover:text-cinema-accent"
+            >
+              Model search
+            </Link>
+            <Link
               href="/videos"
               className="text-sm text-cinema-muted transition-colors hover:text-cinema-accent"
             >
